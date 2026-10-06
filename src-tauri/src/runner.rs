@@ -48,6 +48,14 @@ struct Run {
 }
 
 impl Run {
+    fn initialized_model_request(&mut self, directory: &std::path::Path) -> Value {
+        if let Some(model) = self.task.requested_model.clone() {
+            self.task.event(&format!("本次请求模型：{model}"), "system", "工作台");
+            self.thread_request(directory, &model)
+        } else {
+            json!({"id":4,"method":"model/list","params":{"limit":100}})
+        }
+    }
     fn thread_request(&mut self, directory: &std::path::Path, model: &str) -> Value {
         self.requested_model = Some(model.into());
         match &self.resume_turn {
@@ -783,6 +791,23 @@ mod tests {
             .tasks
             .is_empty());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn task_model_is_sent_only_after_initialization_and_reused_for_resume() {
+        let mut run=fake_run();
+        run.task.requested_model=Some("chosen-model".into());
+        assert!(run.requested_model.is_none());
+        let start=run.initialized_model_request(std::path::Path::new("/tmp"));
+        assert_eq!(start["method"],"thread/start");
+        assert_eq!(start["params"]["model"],"chosen-model");
+        assert_eq!(start["params"]["sandbox"],"read-only");
+        run.task.thread_id=Some("source".into());run.resume_turn=Some("last-turn".into());run.requested_model=None;
+        let resume=run.initialized_model_request(std::path::Path::new("/tmp"));
+        assert_eq!(resume["method"],"thread/resume");
+        assert_eq!(resume["params"]["model"],"chosen-model");
+        assert_eq!(resume["params"]["threadId"],"source");
+        run.task.requested_model=None;run.requested_model=None;
+        assert_eq!(run.initialized_model_request(std::path::Path::new("/tmp"))["method"],"model/list");
     }
     fn fake_run() -> Run {
         use std::os::unix::process::CommandExt;
@@ -2073,7 +2098,7 @@ impl Runtime {
                         self.fail(app, run, "初始化通知发送失败", "failed");
                         return false;
                     }
-                    Some(json!({"id":4,"method":"model/list","params":{"limit":100}}))
+                    Some(r.initialized_model_request(directory))
                 }
                 4 if r.startup == Startup::Connecting && r.requested_model.is_none() => {
                     match select_model(&message["result"], &mut r.model_cursors) {
@@ -2375,6 +2400,7 @@ impl Executor for Runtime {
     fn doctor(&self) -> Doctor {
         doctor()
     }
+    fn models(&self) -> Result<Vec<crate::executor::ExecutorModel>, String> { model_catalog() }
     fn ensure_idle(&self) -> Result<(), String> {
         Runtime::ensure_idle(self)
     }
@@ -2427,4 +2453,64 @@ impl Executor for Runtime {
     fn shutdown(&self) {
         Runtime::shutdown(self)
     }
+}
+
+
+pub(crate) fn model_catalog() -> Result<Vec<crate::executor::ExecutorModel>, String> {
+    let mut child = OwnedChild::new(command().spawn().map_err(|_| "无法启动 Codex CLI，请先检查连接")?);
+    let stdout = child.child.stdout.take().unwrap();
+    let mut stderr = child.child.stderr.take().unwrap();
+    thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::sink()); });
+    let (tx, rx) = mpsc::sync_channel(8);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let result = read_message(&mut reader);
+            let done = !matches!(&result, Ok(Some(_)));
+            if tx.send(result).is_err() || done { break; }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut bytes = 0usize;
+    let mut messages = 0usize;
+    let mut response = |id: u64| -> Result<Value, String> {
+        loop {
+            let value = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| "Codex 模型目录查询超时")??.ok_or("Codex 模型目录连接已关闭")?;
+            messages += 1;
+            bytes += value.to_string().len();
+            if messages > 128 || bytes > 1024 * 1024 { return Err("模型目录响应超过大小限制".into()); }
+            if value["id"] == id {
+                if value.get("error").is_some() { return Err(error_message(&value["error"])); }
+                return value.get("result").cloned().ok_or("模型目录响应缺少 result".into());
+            }
+        }
+    };
+    let result = (|| {
+        let input = child.child.stdin.as_mut().unwrap();
+        send(input, &initialize())?;
+        response(1)?;
+        send(input, &json!({"method":"initialized"}))?;
+        let mut cursor: Option<String> = None;
+        let mut cursors = Vec::new();
+        let mut models: Vec<crate::executor::ExecutorModel> = Vec::new();
+        for _ in 0..8 {
+            send(input, &json!({"id":2,"method":"model/list","params":{"limit":100,"includeHidden":false,"cursor":cursor}}))?;
+            let page = response(2)?;
+            for model in crate::executor::codex_model_page(&page)? {
+                if !models.iter().any(|m| m.id == model.id) { models.push(model); }
+            }
+            if models.len() > 512 { return Err("模型目录超过数量限制".into()); }
+            match page.get("nextCursor") {
+                None | Some(Value::Null) => return if models.is_empty() { Err("Codex 未返回可选模型".into()) } else { Ok(models) },
+                Some(Value::String(next)) if !next.is_empty() && next.len() <= 1024 && !cursors.contains(next) => {
+                    cursors.push(next.clone()); cursor = Some(next.clone());
+                }
+                _ => return Err("模型目录分页格式无效或重复".into()),
+            }
+        }
+        Err("模型目录分页超过 8 页".into())
+    })();
+    child.stop()?;
+    result
 }

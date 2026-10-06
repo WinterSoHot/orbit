@@ -55,7 +55,7 @@ export function TaskWorkspace(p:Props){
     {p.queue.paused&&p.queue.reason&&<div className="workflow-notice" role="status">{p.queue.reason}</div>}
     {notice&&<div className="workflow-notice" role="status">{notice}<button className="icon-button" aria-label="关闭移动提示" onClick={()=>setNotice('')}><X size={13}/></button></div>}
     <div className="workflow-layout">
-      <aside className="conversation-pane">{task?<><div className="conversation-title"><div className="conversation-identity"><h2>{task.title}</h2><span>{executorName(task.provider,p.executors)}</span></div><div className="conversation-actions">
+      <aside className="conversation-pane">{task?<><div className="conversation-title"><div className="conversation-identity"><h2>{task.title}</h2><span>{executorName(task.provider,p.executors)}{task.requestedModel&&<small title="请求模型"> · {task.requestedModel}</small>}</span></div><div className="conversation-actions">
           {!task.queue&&task.status==='queued'&&<button className="primary-button compact" disabled={!p.desktop||p.busy||!p.executors.some(e=>e.id===task.provider)} onClick={()=>p.onStart(task)}><Play size={13}/>启动</button>}
           {isActive(task.status)&&<button className="secondary-button compact" disabled={!p.desktop||p.busy||task.status==='cancelling'||!taskCapabilities(task).interrupt} onClick={()=>p.onStop(task)}><Square size={12}/>中断</button>}
           {canAccept(task)&&<button className="primary-button compact" aria-label="验收交付" disabled={!p.desktop||p.busy} onClick={()=>p.onAccept(task)}><CheckCircle2 size={13}/>验收</button>}

@@ -455,13 +455,14 @@ fn cli_path() -> PathBuf {
     }
     PathBuf::from("qodercli")
 }
-fn command_at(path: &Path) -> Command {
+fn command_at(path: &Path, model: Option<&str>) -> Command {
     let mut command = Command::new(path);
     command
         .arg("--acp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(model) = model { command.arg("--model").arg(model); }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -480,7 +481,7 @@ pub fn doctor() -> Doctor {
         message: "未找到 Qoder CLI；请安装并在 CLI 中登录".into(),
         capabilities: Capabilities::default(),
     };
-    let Ok(child) = command_at(&path).spawn() else {
+    let Ok(child) = command_at(&path, None).spawn() else {
         return report;
     };
     report.available = true;
@@ -673,6 +674,7 @@ impl Executor for QoderExecutor {
     fn doctor(&self) -> Doctor {
         doctor()
     }
+    fn models(&self) -> Result<Vec<crate::executor::ExecutorModel>, String> { model_catalog() }
     fn ensure_idle(&self) -> Result<(), String> {
         for run in self.runs.lock().unwrap().values() {
             let mut r = run.lock().unwrap();
@@ -720,7 +722,8 @@ impl Executor for QoderExecutor {
         };
         #[cfg(not(unix))]
         let files = None;
-        let child = match command_at(&cli_path()).current_dir(&cwd).spawn() {
+        let mut command = command_at(&cli_path(), task.requested_model.as_deref());
+        let child = match command.current_dir(&cwd).spawn() {
             Ok(child) => child,
             Err(_) => {
                 finish_failure(
@@ -1323,6 +1326,98 @@ mod tests {
                 .len(),
             2
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+
+fn model_catalog() -> Result<Vec<crate::executor::ExecutorModel>, String> {
+    #[cfg(unix)] { crate::executor::qoder_model_catalog(&capture_model_names(&cli_path(), Duration::from_secs(20))?) }
+    #[cfg(not(unix))] { Err("此平台尚未开放 Qoder 模型目录".into()) }
+}
+
+#[cfg(unix)]
+fn capture_model_names(path: &Path, timeout: Duration) -> Result<String, String> {
+    use std::{io::BufRead, os::unix::process::CommandExt};
+    let marker = format!("ORBIT_EXIT_{}", uuid::Uuid::new_v4());
+    // Keep the group leader alive until cleanup, including after the CLI exits.
+    // CLI arguments are separate argv, never interpolated into this fixed script.
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", r#"marker=$1; shift; "$@" </dev/null; code=$?; printf '\n%s:%s\n' "$marker" "$code"; IFS= read -r hold"#, "orbit-model-query"])
+        .arg(&marker).arg(path).arg("--list-models")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let mut child = OwnedChild::new(command.spawn().map_err(|_| "无法启动 Qoder CLI，请先检查连接")?);
+    let stdout = child.child.stdout.take().unwrap();
+    let mut stderr = child.child.stderr.take().unwrap();
+    thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::sink()); });
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout).take(65537);
+        let result = (|| {
+            let mut output = String::new();
+            loop {
+                let mut line = String::new();
+                let count = reader.read_line(&mut line).map_err(|_| "无法读取 Qoder 模型目录")?;
+                if count == 0 { return Err("Qoder 模型目录未返回退出状态".into()); }
+                if let Some(code) = line.strip_prefix(&format!("{marker}:")).and_then(|s|s.strip_suffix('\n')) {
+                    let status = code.parse::<u8>().map_err(|_| "Qoder 返回无效退出状态")?;
+                    return if status == 0 { Ok(output) } else { Err(format!("Qoder 模型目录查询失败（退出码 {status}），请检查 CLI 登录状态")) };
+                }
+                output.push_str(&line);
+                if output.len() > 65536 { return Err("Qoder 模型目录超过大小限制".into()); }
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    let result = rx.recv_timeout(timeout).map_err(|_| "Qoder 模型目录查询超时".to_string()).and_then(|r|r);
+    child.stop()?;
+    result
+}
+
+
+#[cfg(test)]
+mod model_selection_tests {
+    use super::*;
+    #[test]
+    fn selected_model_is_a_single_acp_argument() {
+        let command = command_at(Path::new("qoder"), Some("Qwen3.8-Max"));
+        assert_eq!(command.get_args().map(|v| v.to_str().unwrap()).collect::<Vec<_>>(), vec!["--acp", "--model", "Qwen3.8-Max"]);
+        assert_eq!(command_at(Path::new("qoder"), None).get_args().count(),1);
+    }
+    #[test]
+    #[ignore = "explicit local catalog inspection; no session or inference"]
+    fn local_executor_catalogs_without_inference() {
+        let qoder = model_catalog().unwrap();
+        assert!(!qoder.is_empty());
+        let codex = crate::runner::model_catalog().unwrap();
+        assert!(!codex.is_empty());
+        println!("Read actual model catalogs: Codex {}, Qoder {}",codex.len(),qoder.len());
+    }
+}
+
+
+#[cfg(all(test, unix))]
+mod catalog_supervisor_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn catalog_command_checks_exit_timeout_and_cleans_descendants() {
+        let dir=std::env::temp_dir().join(format!("orbit-catalog-process-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("cli");
+        let write=|script:&str| {std::fs::write(&path,format!("#!/bin/sh\n{script}\n")).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o700)).unwrap();};
+        write("printf 'MODEL\\nQwen-test\\n'");
+        assert!(capture_model_names(&path,Duration::from_secs(2)).unwrap().contains("Qwen-test"));
+        write("printf 'MODEL\\nQwen-test\\n'; exit 7");
+        assert!(capture_model_names(&path,Duration::from_secs(2)).unwrap_err().contains("退出码 7"));
+        write("sleep 60");
+        assert!(capture_model_names(&path,Duration::from_millis(50)).unwrap_err().contains("超时"));
+        write(&format!("sleep 60 & echo $! > '{}'; printf 'MODEL\\nQwen-test\\n'",dir.join("pid").display()));
+        capture_model_names(&path,Duration::from_secs(2)).unwrap();
+        let pid=std::fs::read_to_string(dir.join("pid")).unwrap();
+        let state=Command::new("/bin/ps").args(["-o","stat=","-p",pid.trim()]).output().unwrap();
+        let state=String::from_utf8_lossy(&state.stdout);
+        assert!(state.trim().is_empty()||state.trim().starts_with('Z'),"descendant still alive: {state}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

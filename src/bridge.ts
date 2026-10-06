@@ -19,10 +19,11 @@ export async function watchRuntime(callback:(task:Task)=>void,onWarning:(message
   const releaseWarning=await listen<string>('runtime-warning',event=>onWarning(event.payload));
   return ()=>{releaseTask();releaseWarning();};
 }
+export const listExecutorModels=(provider:string)=>invoke<import('./executors').ExecutorModel[]>('list_executor_models',{provider});
 export const checkCli=(provider:string)=>invoke<Doctor>('doctor',{provider});
 export const exportArtifact=(artifactId:string)=>invoke<string>('export_artifact',{artifactId});
 // Legacy storage/IPC still requires scene; it no longer controls UI or execution.
-export const createReal=(title:string,prompt:string,provider:string)=>invoke<Task>('create_task',{title,prompt,scene:'research',provider});
+export const createReal=(title:string,prompt:string,provider:string,requestedModel:string|null=null)=>invoke<Task>('create_task',{title,prompt,scene:'research',provider,requestedModel});
 export const startReal=(task:Task)=>invoke<Task>('start_run',{taskId:task.id,revision:task.revision});
 export const steerReal=(runId:string,text:string)=>invoke('steer_run',{runId,text});
 export const cancelReal=(runId:string)=>invoke('interrupt_run',{runId});

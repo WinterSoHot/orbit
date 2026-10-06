@@ -164,6 +164,8 @@ pub struct Task {
     #[serde(default = "crate::executor::default_provider")]
     pub provider: String,
     #[serde(default)]
+    pub requested_model: Option<String>,
+    #[serde(default)]
     pub session_ref: Option<crate::executor::SessionRef>,
     #[serde(default)]
     pub capabilities: Option<crate::executor::Capabilities>,
@@ -204,6 +206,7 @@ impl Task {
             prompt,
             scene,
             provider: "codex".into(),
+            requested_model: None,
             session_ref: None,
             capabilities: None,
             status: "running".into(),
@@ -560,5 +563,21 @@ mod platform_merge_tests {
         let clock=actor.revision;actor.merge_platform(&platform);assert_eq!(actor.status,"completed");assert_eq!(actor.revision,clock);assert_eq!(actor.artifacts[0].content,"fresh");
         platform.status="completed".into();platform.turn_id=Some("other".into());actor.merge_platform(&platform);assert_eq!(actor.artifacts[0].content,"fresh");
         platform.turn_id=actor.turn_id.clone();platform.artifacts=actor.artifacts.clone();platform.artifacts[0].content="user edit".into();actor.merge_platform(&platform);assert_eq!(actor.artifacts[0].content,"user edit");assert_eq!(actor.revision,clock);
+    }
+}
+
+#[cfg(test)]
+mod requested_model_tests {
+    use super::*;
+    #[test]
+    fn requested_model_survives_deserialization_and_legacy_records() {
+        let old = Task::new("test".into(),"goal".into(),"research".into());
+        let mut json = serde_json::to_value(&old).unwrap();
+        json["requestedModel"] = serde_json::json!("chosen-model");
+        let chosen: Task = serde_json::from_value(json).unwrap();
+        assert_eq!(serde_json::to_value(chosen).unwrap()["requestedModel"],"chosen-model");
+        let mut legacy = serde_json::to_value(old).unwrap();
+        legacy.as_object_mut().unwrap().remove("requestedModel");
+        assert!(serde_json::from_value::<Task>(legacy).is_ok());
     }
 }

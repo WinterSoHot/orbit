@@ -6,3 +6,6 @@ export const previewExecutors:ExecutorDescriptor[]=[
   {id:'qoder',name:'Qoder',protocol:'acp-v1',description:'本机 CLI，续交付以连接确认的能力为准',permissionNote:'仅开放任务目录读取，拒绝工具权限请求；非系统沙箱',capabilities:{resume:false,steer:false,interrupt:true,input:false,agentHistory:false}},
 ];
 export const executorName=(id:string,catalog:ExecutorDescriptor[])=>catalog.find(e=>e.id===id)?.name||id;
+
+export interface ExecutorModel {id:string;name:string;description:string;isDefault:boolean}
+export interface ModelCatalogState {models?:ExecutorModel[];loading:boolean;error:string|null}

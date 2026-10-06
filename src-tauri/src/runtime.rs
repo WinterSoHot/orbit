@@ -52,6 +52,9 @@ impl Runtime {
     pub fn doctor(&self, provider: &str) -> Result<Doctor, String> {
         Ok(self.executor(provider)?.doctor())
     }
+    pub fn models(&self, provider: &str) -> Result<Vec<crate::executor::ExecutorModel>, String> {
+        self.executor(provider)?.models()
+    }
     fn begin(&self) -> Result<std::sync::MutexGuard<'_, bool>, String> {
         let guard = self.lifecycle.lock().unwrap();
         if *guard {
@@ -72,9 +75,13 @@ impl Runtime {
         prompt: String,
         scene: String,
         provider: String,
+        requested_model: Option<String>,
     ) -> Result<Task, String> {
         let _guard = self.begin()?;
         let executor = self.executor(&provider)?;
+        if requested_model.as_deref().is_some_and(|id| !crate::executor::valid_model_id(id)) {
+            return Err("模型标识无效".into());
+        }
         if title.trim().is_empty()
             || title.chars().count() > 100
             || prompt.trim().is_empty()
@@ -85,6 +92,7 @@ impl Runtime {
         }
         let mut task = Task::new(title.trim().into(), prompt.trim().into(), scene);
         task.provider = provider;
+        task.requested_model = requested_model;
         task.capabilities = Some(executor.descriptor().capabilities);
         task.status = "queued".into();
         task.started_at = None;
@@ -283,11 +291,10 @@ mod tests {
                 "x".into(),
                 "y".into(),
                 "research".into(),
-                "unregistered".into()
-            )
+                "unregistered".into(), None)
             .is_err());
         let mut task = runtime
-            .create("x".into(), "y".into(), "research".into(), "qoder".into())
+            .create("x".into(), "y".into(), "research".into(), "qoder".into(), None)
             .unwrap();
         assert_eq!(task.provider, "qoder");
         task.provider = "codex".into();
@@ -367,8 +374,7 @@ mod tests {
                 "done".into(),
                 "finished".into(),
                 "research".into(),
-                "third".into(),
-            )
+                "third".into(), None)
             .unwrap();
         completed.status = "completed".into();
         completed.artifacts.push(crate::model::Artifact {
@@ -412,8 +418,8 @@ mod queue_tests {
     fn pause_resume_keeps_active_failure_checkpoint() {
         let directory=std::env::temp_dir().join(format!("orbit-pause-race-{}",uuid::Uuid::new_v4()));
         let runtime=Runtime::new(Store::open(directory.clone()).unwrap());
-        let a=runtime.create("a".into(),"goal".into(),"research".into(),"codex".into()).unwrap();
-        let b=runtime.create("b".into(),"goal".into(),"research".into(),"qoder".into()).unwrap();
+        let a=runtime.create("a".into(),"goal".into(),"research".into(),"codex".into(), None).unwrap();
+        let b=runtime.create("b".into(),"goal".into(),"research".into(),"qoder".into(), None).unwrap();
         runtime.enqueue_start(&a.id,a.revision,|_|{}).unwrap();runtime.enqueue_start(&b.id,b.revision,|_|{}).unwrap();
         let (mut actor,_)=runtime.next_for_dispatch().unwrap().unwrap();let q=actor.queue.clone().unwrap();runtime.store.finish_claim(&a.id,&q.request_id,&q.next_run_id,None).unwrap();
         runtime.set_queue_paused(true).unwrap();runtime.set_queue_paused(false).unwrap();
@@ -424,7 +430,7 @@ mod queue_tests {
     #[test]
     fn idle_claim_recovers_after_bookkeeping_and_final_write_failure() {
         let directory=std::env::temp_dir().join(format!("orbit-claim-disk-{}",uuid::Uuid::new_v4()));
-        let runtime=Runtime::new(Store::open(directory.clone()).unwrap());let task=runtime.create("a".into(),"goal".into(),"research".into(),"codex".into()).unwrap();
+        let runtime=Runtime::new(Store::open(directory.clone()).unwrap());let task=runtime.create("a".into(),"goal".into(),"research".into(),"codex".into(), None).unwrap();
         runtime.enqueue_start(&task.id,task.revision,|_|{}).unwrap();let (mut actor,_)=runtime.next_for_dispatch().unwrap().unwrap();let q=actor.queue.clone().unwrap();
         std::fs::create_dir(directory.join("workspace.tmp")).unwrap();
         assert!(runtime.store.finish_claim(&task.id,&q.request_id,&q.next_run_id,None).is_err());
@@ -442,7 +448,7 @@ mod queue_tests {
     fn unknown_claim_cannot_be_cancelled_until_executor_is_idle() {
         let directory=std::env::temp_dir().join(format!("orbit-cancel-claim-{}",uuid::Uuid::new_v4()));
         let idle=Runtime::new(Store::open(directory.clone()).unwrap());
-        let task=idle.create("x".into(),"goal".into(),"research".into(),"codex".into()).unwrap();
+        let task=idle.create("x".into(),"goal".into(),"research".into(),"codex".into(), None).unwrap();
         idle.enqueue_start(&task.id,task.revision,|_|{}).unwrap();
         let (claimed,_)=idle.next_for_dispatch().unwrap().unwrap();let request=claimed.queue.unwrap();
         let unknown=idle.store.finish_claim(&task.id,&request.request_id,&request.next_run_id,Some("launch result unknown".into())).unwrap();
@@ -457,7 +463,7 @@ mod queue_tests {
     fn restart_pauses_pending_and_resume_obeys_active_executor() {
         let directory=std::env::temp_dir().join(format!("orbit-dispatch-test-{}",uuid::Uuid::new_v4()));
         let runtime=Runtime::new(Store::open(directory.clone()).unwrap());
-        let task=runtime.create("first".into(),"goal".into(),"research".into(),"qoder".into()).unwrap();
+        let task=runtime.create("first".into(),"goal".into(),"research".into(),"qoder".into(), None).unwrap();
         runtime.enqueue_start(&task.id,task.revision,|_|{}).unwrap();assert!(!runtime.queue_state().paused);
         let restarted=Runtime::new(Store::open(directory.clone()).unwrap());assert!(restarted.queue_state().paused);assert!(restarted.next_for_dispatch().unwrap().is_none());
         restarted.set_queue_paused(false).unwrap();let (claimed,_)=restarted.next_for_dispatch().unwrap().unwrap();assert_eq!(claimed.provider,"qoder");

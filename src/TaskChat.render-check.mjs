@@ -75,10 +75,13 @@ try {
   const {ExecutorPicker}=await server.ssrLoadModule('/src/ExecutorPicker.tsx');
   const {ExecutorSettings}=await server.ssrLoadModule('/src/ExecutorSettings.tsx');
   const executors=[{id:'codex',name:'Codex',description:'Code executor',permissionNote:'Read only',capabilities:{resume:true,steer:true,interrupt:true,agentHistory:true}}, {id:'qoder',name:'Qoder',description:'Qoder executor',permissionNote:'Restricted callbacks',capabilities:{resume:false,steer:false,interrupt:true,agentHistory:false}}, {id:'third',name:'Third executor',description:'Additional adapter',permissionNote:'Own policy',capabilities:{resume:false,steer:false,interrupt:true,agentHistory:false}}];
-  const picker=renderToStaticMarkup(React.createElement(ExecutorPicker,{executors,value:'qoder',onChange:()=>{}}));
-  assert(picker.includes('Qoder')&&picker.includes('Third executor')&&picker.includes('checked=""'));
-  const settings=renderToStaticMarkup(React.createElement(ExecutorSettings,{executors,doctors:{},checking:null,desktop:true,onCheck:()=>{}}));
-  assert(settings.includes('Qoder')&&settings.includes('Third executor')&&settings.includes('检查连接'));
+  const picker=renderToStaticMarkup(React.createElement(ExecutorPicker,{executors,value:'qoder',onChange:()=>{},model:'Qwen-test',onModelChange:()=>{},catalog:{models:[{id:'Qwen-test',name:'Qwen Test',description:'',isDefault:false}],loading:false,error:null},desktop:true,onLoad:()=>{}}));
+  assert(picker.includes('Qoder')&&picker.includes('Third executor')&&picker.includes('checked=""')&&picker.includes('aria-pressed="true"'));
+  assert(picker.includes('Qwen Test')&&!picker.includes('GPT Test'));
+  const defaultPicker=renderToStaticMarkup(React.createElement(ExecutorPicker,{executors,value:'codex',onChange:()=>{},model:null,onModelChange:()=>{},desktop:true,onLoad:()=>{}}));
+  assert((defaultPicker.match(/<input[^>]+>/g)??[]).some(tag=>tag.includes('name="executor-model"')&&tag.includes('value=""')&&tag.includes('checked=""')));
+  const settings=renderToStaticMarkup(React.createElement(ExecutorSettings,{executors,doctors:{},checking:null,desktop:true,onCheck:()=>{},catalogs:{codex:{models:[{id:'gpt-test',name:'GPT Test',description:'',isDefault:true}],loading:false,error:null}},defaults:{codex:'gpt-test'},onModelChange:()=>{},onLoad:()=>{}}));
+  assert(settings.includes('Qoder')&&settings.includes('Third executor')&&settings.includes('检查 Codex 连接')&&settings.includes('GPT Test')&&!settings.includes('Qwen Test'));
   const qoderTask={...task,provider:'qoder',status:'running',threadId:null,sessionRef:{provider:'qoder',protocol:'acp-v1',id:'s'},capabilities:executors[1].capabilities};
   const qoderChat=render({task:qoderTask,executorName:'Qoder'});
   assert(qoderChat.includes('Qoder 正在处理')&&!qoderChat.includes('Codex 正在处理'));

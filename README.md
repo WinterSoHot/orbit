@@ -2,6 +2,8 @@
 
 Tauri 2 + React + TypeScript + Rust 的本地桌面原型。支持调研、编程、写作任务；任务列表、动态 Agent 关系图、待介入、运行记录与 Markdown 交付；独立本地知识库支持 PDF、网页和 Markdown。
 
+设置和新建任务按 Codex / Qoder 分别展示本机可用模型，支持刷新和记住各自默认选择；任务保留创建时的模型选择，并应用到启动与续交付。
+
 ## 运行
 
 已构建的 macOS 应用位于 `src-tauri/target/debug/bundle/macos/Orbit.app`（已生成本机调试版本）。本机测试环境：macOS 13.7.8 Intel、Node 24.21.0、Rust 1.98.0、Codex 0.160.0。
@@ -80,8 +82,8 @@ CI 使用 Node 24、Rust 1.98.0 与 `macos-15-intel`；应用最低系统版本�
 发布前同步上述版本文件并提交到 `main`，然后推送对应标签，例如当前版本：
 
 ```sh
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 也可在 Actions 的 Release 工作流中选择已有版本标签手动运行；选择分支或版本不一致时会拒绝发布。已存在的 Release 不会覆盖，后续交付请使用新版本标签。

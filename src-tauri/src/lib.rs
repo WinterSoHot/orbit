@@ -194,18 +194,26 @@ mod desktop {
         .map_err(|_| "连接检查进程失败".to_string())?
     }
     #[tauri::command]
+    async fn list_executor_models(runtime: State<'_, Runtime>, provider: String) -> Result<Vec<crate::executor::ExecutorModel>, String> {
+        let owned = runtime.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || owned.models(&provider)).await
+            .map_err(|_| "模型目录查询进程失败".to_string())?
+    }
+    #[tauri::command]
     fn create_task(
         runtime: State<Runtime>,
         title: String,
         prompt: String,
         scene: String,
         provider: Option<String>,
+        requested_model: Option<String>,
     ) -> Result<Task, String> {
         runtime.create(
             title,
             prompt,
             scene,
             provider.unwrap_or_else(|| "codex".into()),
+            requested_model,
         )
     }
     #[tauri::command]
@@ -331,6 +339,7 @@ mod desktop {
                 sync_agents,
                 doctor,
                 list_executors,
+                list_executor_models,
                 create_task,
                 load_queue_state, set_queue_paused, cancel_queued, accept_task,
                 start_run,

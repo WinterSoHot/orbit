@@ -114,8 +114,8 @@ impl Store {
         let mut data = self.data.lock().unwrap();
         let mut candidate = data.clone();
         if let Some(old) = candidate.tasks.iter_mut().find(|t| t.id == task.id) {
-            if old.provider != task.provider {
-                return Err("任务执行器不可变，请新建任务选择其他执行器".into());
+            if old.provider != task.provider || old.requested_model != task.requested_model {
+                return Err("任务执行器与模型不可变，请新建任务调整选择".into());
             }
             if task.revision < old.revision {
                 return Ok(());
@@ -227,6 +227,7 @@ impl Store {
         let current = &data.tasks[index];
         if current.archived
             || current.provider != task.provider
+            || current.requested_model != task.requested_model
             || current.run_id != task.run_id
             || task.revision <= current.executor_revision.unwrap_or(current.revision)
             || (current.terminal() && (current.status != task.status || current.turn_id != task.turn_id))
@@ -562,7 +563,8 @@ fn validate(task: &Task) -> Result<(), String> {
         return Err("Agent 活动记录超过大小限制".into());
     }
 
-    if !crate::executor::valid_provider(&task.provider)
+    if task.requested_model.as_deref().is_some_and(|id| !crate::executor::valid_model_id(id))
+        || !crate::executor::valid_provider(&task.provider)
         || !matches!(task.scene.as_str(), "research" | "coding" | "writing")
         || !matches!(
             task.status.as_str(),
@@ -1575,5 +1577,30 @@ mod workflow_tests {
         let failed=s.finish_claim(&t.id,&q.request_id,&q.next_run_id,Some("spawn failed".into())).unwrap();assert_eq!(failed.status,"unknown");assert!(failed.queue.as_ref().unwrap().error.is_some());assert!(s.claim_next().is_err());
         let cancelled=s.cancel_queued(&t.id,failed.revision).unwrap();assert!(cancelled.queue.is_none());
         std::fs::remove_dir_all(s.directory).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod model_selection_tests {
+    use super::*;
+    #[test]
+    fn requested_model_is_immutable_in_both_save_paths_and_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!("orbit-model-{}",uuid::Uuid::new_v4()));
+        let store=Store::open(dir.clone()).unwrap();
+        let mut task=Task::new("selected".into(),"goal".into(),"research".into());
+        task.requested_model=Some("gpt-test".into());
+        store.save_task(task.clone()).unwrap();
+        let mut changed=task.clone(); changed.revision += 1; changed.requested_model=Some("other-model".into());
+        assert!(store.save_task(changed.clone()).is_err());
+        assert!(store.save_existing_task(changed.clone()).unwrap().is_none());
+        changed.requested_model=task.requested_model.clone();
+        assert!(store.save_existing_task(changed).unwrap().is_some());
+        let mut invalid=Task::new("invalid".into(),"goal".into(),"research".into());
+        invalid.requested_model=Some("bad\nmodel".into());
+        assert!(store.save_task(invalid).is_err());
+        drop(store);
+        assert_eq!(Store::open(dir.clone()).unwrap().task(&task.id).unwrap().requested_model,Some("gpt-test".into()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

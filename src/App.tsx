@@ -1,15 +1,16 @@
 import {applyTheme,initialTheme,saveTheme} from './theme';
 import type {Theme} from './theme';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, BookOpen, Archive, Trash2, ArrowUpRight, RefreshCw, Bell, Bot, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, PanelLeftClose, PanelLeftOpen, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
 import { applyRuntime, canContinue, isAccepted, boardColumn, isActive, isTerminal, taskCapabilities, statusLabels } from './model';
 import type { AgentNode, Artifact, Status, Task } from './model';
-import { loadQueue, watchQueue, pauseQueue, cancelQueued, acceptTask, collectArtifact, listExecutors, getExportSettings, chooseExportDirectory, resetExportDirectory, cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, exportWorkspace, loadTasks, replyReal, archiveTask, deleteTask, continueReal, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+import { loadQueue, watchQueue, pauseQueue, cancelQueued, acceptTask, collectArtifact, listExecutorModels, listExecutors, getExportSettings, chooseExportDirectory, resetExportDirectory, cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, exportWorkspace, loadTasks, replyReal, archiveTask, deleteTask, continueReal, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
 import type { Doctor, ExportSettings, QueueState } from './bridge';
 import { ExecutorPicker } from './ExecutorPicker';
 import { ExecutorSettings } from './ExecutorSettings';
 import { executorName } from './executors';
-import type { ExecutorDescriptor } from './executors';
+import {modelAvailable,modelDefaultsKey,readModelDefaults} from './modelSelection';
+import type { ModelCatalogState, ExecutorDescriptor } from './executors';
 import { exportAfterSave } from './exportSnapshot';
 import { ExportDirectorySettings } from './ExportDirectorySettings';
 import { Graph } from './Graph';
@@ -43,6 +44,20 @@ export default function App() {
   const [queue,setQueue]=useState<QueueState>({paused:false,reason:null});
   const [chatDrafts,setChatDrafts]=useState<Record<string,string>>({});
   const [exportSettings,setExportSettings]=useState<ExportSettings|null>(null);
+  const [modelDefaults,setModelDefaults]=useState<Record<string,string|null>>(()=>{try{return readModelDefaults(window.localStorage);}catch{return {};}});
+  const [modelCatalogs,setModelCatalogs]=useState<Record<string,ModelCatalogState>>({});
+  const modelCache=useRef<Record<string,ModelCatalogState>>({}),modelQueries=useRef(new Set<string>());
+  const loadModels=useCallback((provider:string,refresh=false)=>{
+    if(!desktop||!provider||modelQueries.current.has(provider)||!refresh&&modelCache.current[provider])return;
+    modelQueries.current.add(provider);
+    const publish=(value:ModelCatalogState)=>{modelCache.current={...modelCache.current,[provider]:value};setModelCatalogs(modelCache.current);};
+    publish({...modelCache.current[provider],loading:true,error:null});
+    void listExecutorModels(provider).then(models=>publish({models,loading:false,error:null}),error=>publish({loading:false,error:errorText(error)})).finally(()=>modelQueries.current.delete(provider));
+  },[]);
+  function chooseModel(provider:string,model:string|null){
+    const next={...modelDefaults,[provider]:model};setModelDefaults(next);
+    try{window.localStorage.setItem(modelDefaultsKey,JSON.stringify(next));}catch{setToast('模型选择已应用，本机存储不可用，重启后不会保留');}
+  }
   const [executors,setExecutors]=useState<ExecutorDescriptor[]>([]);
   const continuing=useRef(false),lastSave=useRef<Promise<unknown>|null>(null);
   const library=useRef<LibraryHandle>(null);
@@ -102,7 +117,7 @@ export default function App() {
   async function chooseFolder(){await perform(async()=>{const value=await chooseExportDirectory();if(value){setExportSettings(value);setToast(`导出文件夹已设置：${value.directory}`);}});}
   async function resetFolder(){await perform(async()=>{const value=await resetExportDirectory();setExportSettings(value);setToast('导出文件夹已恢复默认');});}
   async function inspectCli(provider:string){setChecking(provider);try{const result=await checkCli(provider);setDoctors(current=>({...current,[provider]:result}));}catch(error){setToast(errorText(error));}finally{setChecking(null);}}
-  async function create(title:string,prompt:string,provider:string){await perform(async()=>{if(view==='knowledge')await library.current?.flush();const next=await createReal(title,prompt,provider);setTasks(current=>[next,...current]);select(next);setView('tasks');setTaskFilter('all');setQuery('');setModal(false);});}
+  async function create(title:string,prompt:string,provider:string,model:string|null){await perform(async()=>{if(view==='knowledge')await library.current?.flush();const next=await createReal(title,prompt,provider,model);setTasks(current=>[next,...current]);select(next);setView('tasks');setTaskFilter('all');setQuery('');setModal(false);});}
   async function saveDocument(expected:string,content:string):Promise<Artifact>{
     const id=artifact!.id;
     const operation=saveQueue.current.then(async()=>{
@@ -162,19 +177,21 @@ export default function App() {
         {view==='attention'&&<AttentionPanel tasks={attention} executors={executors} busy={busy} desktop={desktop} onOpen={target=>{select(target);void navigate('tasks');}} onAnswer={answer}/>}
         {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">任务实际生成的交付</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{executorName(t.provider,executors)} 输出</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>还没有交付物</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
         {view==='knowledge'&&<KnowledgeLibrary ref={library} onNotice={setToast}/>}
-        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>工作台偏好</h2><p>管理主题、数据位置与本机执行器。</p></div><span className="provider-label">{executors.length} 个执行器</span></div><div className="settings-body"><div className="settings-line"><div><strong>外观</strong><p>选择工作台主题，下次打开时保留。</p></div><div className="theme-picker" role="group" aria-label="主题">{(['light','dark'] as const).map(value=><button key={value} aria-pressed={theme===value} onClick={()=>chooseTheme(value)}>{value==='light'?'Light':'Dark'}</button>)}</div></div><h3 className="settings-section-title">数据与导出</h3><ExportDirectorySettings value={exportSettings} desktop={desktop} busy={busy} onChoose={chooseFolder} onReset={resetFolder} onExport={exportAllData}/><h3 className="settings-section-title">执行器</h3><ExecutorSettings executors={executors} doctors={doctors} checking={checking} desktop={desktop} onCheck={inspectCli}/>{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器仅预览界面；打开 Orbit 桌面 App 后可连接本机执行器。</div>}<h3 className="settings-section-title">运行</h3><div className="settings-line"><div><strong>并发与恢复</strong><p>所有执行器共用运行控制；重启保留记录，旧审批失效。</p></div><span className="setting-value">同时 1 个根任务</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>检查连接只验证初始化，不调用模型。任务运行会消耗对应执行器的额度；功能以本次连接确认的能力为准。</p></div></div></section>}
+        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>工作台偏好</h2><p>管理主题、数据位置与本机执行器。</p></div><span className="provider-label">{executors.length} 个执行器</span></div><div className="settings-body"><div className="settings-line"><div><strong>外观</strong><p>选择工作台主题，下次打开时保留。</p></div><div className="theme-picker" role="group" aria-label="主题">{(['light','dark'] as const).map(value=><button key={value} aria-pressed={theme===value} onClick={()=>chooseTheme(value)}>{value==='light'?'Light':'Dark'}</button>)}</div></div><h3 className="settings-section-title">数据与导出</h3><ExportDirectorySettings value={exportSettings} desktop={desktop} busy={busy} onChoose={chooseFolder} onReset={resetFolder} onExport={exportAllData}/><h3 className="settings-section-title">执行器</h3><ExecutorSettings executors={executors} doctors={doctors} checking={checking} desktop={desktop} onCheck={inspectCli} catalogs={modelCatalogs} defaults={modelDefaults} onModelChange={chooseModel} onLoad={loadModels}/>{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器仅预览界面；打开 Orbit 桌面 App 后可连接本机执行器。</div>}<h3 className="settings-section-title">运行</h3><div className="settings-line"><div><strong>并发与恢复</strong><p>所有执行器共用运行控制；重启保留记录，旧审批失效。</p></div><span className="setting-value">同时 1 个根任务</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>检查连接只验证初始化，不调用模型。任务运行会消耗对应执行器的额度；功能以本次连接确认的能力为准。</p></div></div></section>}
         <footer className="page-footer"><span><ShieldCheck size={12}/>{!desktop?'桌面 App 中保存任务记录':persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit <span>·</span> 个人 Agent 工作台</span></footer>
       </div>
     </main>
-    {modal&&<NewTask seed={newTaskSeed} executors={executors} onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
+    {modal&&<NewTask seed={newTaskSeed} executors={executors} catalogs={modelCatalogs} defaults={modelDefaults} onLoad={loadModels} onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
     {agentOutput&&<AgentOutput node={agentOutput} onClose={()=>setAgentOutput(null)}/> }
     {artifact&&<ArtifactEditor key={artifact.id} artifact={artifact} readOnly={tasks.some(t=>t.archived&&t.artifacts.some(a=>a.id===artifact.id))} onClose={()=>{lastSave.current=null;setArtifact(null);}} onSave={saveDocument} onDownload={download} onCollect={desktop?saveToLibrary:undefined}/>}
     {toast&&<div className="toast" role="status"><CircleHelp size={16}/><span>{toast}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setToast('')}><X size={14}/></button></div>}
   </div>;
 }
 
-function NewTask({seed,executors,onClose,onCreate,busy}:{seed?:Task|null;executors:ExecutorDescriptor[];onClose:()=>void;onCreate:(title:string,prompt:string,provider:string)=>void;busy:boolean}) {
+function NewTask({seed,executors,catalogs,defaults,onLoad,onClose,onCreate,busy}:{seed?:Task|null;executors:ExecutorDescriptor[];catalogs:Record<string,ModelCatalogState>;defaults:Record<string,string|null>;onLoad:(id:string,refresh?:boolean)=>void;onClose:()=>void;onCreate:(title:string,prompt:string,provider:string,model:string|null)=>void;busy:boolean}) {
   const [title,setTitle]=useState(seed?`${seed.title.slice(0,96)} 副本`:''),[prompt,setPrompt]=useState(seed?.prompt||''),[provider,setProvider]=useState(executors.some(e=>e.id===seed?.provider)?seed!.provider:executors[0]?.id||'');
+  const [choices,setChoices]=useState<Record<string,string|null>>(()=>seed?{...defaults,[seed.provider]:seed.requestedModel??null}:{...defaults});
+  const model=choices[provider]??null,available=modelAvailable(model,catalogs[provider]?.models);
   useEffect(()=>{if(!provider&&executors.length)setProvider(executors[0].id);},[executors,provider]);
-  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(desktop&&title.trim()&&prompt.trim())onCreate(title,prompt,provider);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>新建任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><ExecutorPicker executors={executors} value={provider} onChange={setProvider}/><div className="new-task-note"><ShieldCheck size={14}/>{desktop?executors.find(e=>e.id===provider)?.permissionNote:'需要打开 Orbit 桌面 App 运行任务'}</div><div className="new-task-note">创建后仍需点击启动，已有任务始终使用创建时选择的执行器。</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!desktop||busy||!title.trim()||!prompt.trim()||!executors.some(e=>e.id===provider)}>创建任务</button></div></form></div>;
+  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(desktop&&title.trim()&&prompt.trim()&&available)onCreate(title,prompt,provider,model);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>新建任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><ExecutorPicker executors={executors} value={provider} onChange={setProvider} model={model} onModelChange={id=>setChoices(current=>({...current,[provider]:id}))} catalog={catalogs[provider]} desktop={desktop} onLoad={onLoad}/><div className="new-task-note"><ShieldCheck size={14}/>{desktop?executors.find(e=>e.id===provider)?.permissionNote:'需要打开 Orbit 桌面 App 运行任务'}</div><div className="new-task-note">创建后仍需点击启动，已有任务始终使用创建时选择的执行器与模型。</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!desktop||busy||!title.trim()||!prompt.trim()||!executors.some(e=>e.id===provider)||!available}>创建任务</button></div></form></div>;
 }
