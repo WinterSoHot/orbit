@@ -1,0 +1,1486 @@
+--- src/App.tsx.before
++++ src/App.tsx
+@@ -2,8 +2,9 @@
+ import { Activity, Archive, Trash2, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+ import { applyRuntime, canContinue, isActive, isTerminal, sceneLabels, statusLabels } from './model';
+ import type { AgentNode, Approval, Artifact, Scene, Status, Task } from './model';
+-import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, archiveTask, deleteTask, continueReal, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+-import type { Doctor } from './bridge';
++import { getExportSettings, chooseExportDirectory, resetExportDirectory, cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, archiveTask, deleteTask, continueReal, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
++import type { Doctor, ExportSettings } from './bridge';
++import { ExportDirectorySettings } from './ExportDirectorySettings';
+ import { Graph } from './Graph';
+ import { TaskChat } from './TaskChat';
+ import { AgentOutput, ArtifactEditor } from './ArtifactEditor';
+@@ -22,6 +23,7 @@
+   const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState(''),[agentOutput,setAgentOutput]=useState<AgentNode|null>(null);
+   const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
+   const [chatDrafts,setChatDrafts]=useState<Record<string,string>>({});
++  const [exportSettings,setExportSettings]=useState<ExportSettings|null>(null);
+   const continuing=useRef(false);
+   const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),deletedIds=useRef(new Set<string>());
+   const visibleTasks=tasks.filter(t=>view==='archive'?t.archived:!t.archived);
+@@ -42,6 +44,7 @@
+     })().catch(error=>{if(mounted.current){persistence.current=false;setTasks([]);setLoaded(true);setToast(`记录读取失败：${errorText(error)}`);}});
+     return()=>{mounted.current=false;unlisten?.();};
+   },[]);
++  useEffect(()=>{if(!desktop)return;let alive=true;getExportSettings().then(value=>{if(alive)setExportSettings(value);}).catch(error=>{if(alive)setToast(`导出设置读取失败：${errorText(error)}`);});return()=>{alive=false;};},[]);
+   useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>setNow(Date.now()),3500);return()=>clearInterval(timer);},[loaded]);
+   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(''),6500);return()=>clearTimeout(timer);},[toast]);
+   useEffect(()=>{const key=(event:KeyboardEvent)=>{if(artifact||agentOutput)return;if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[artifact,agentOutput]);
+@@ -80,6 +83,8 @@
+   }
+   async function stop(){if(!task)return;await perform(()=>cancelReal(task.runId!));}
+   async function answer(target:Task,id:string,answers:Record<string,string>){await perform(()=>replyReal(target.runId!,id,answers));}
++  async function chooseFolder(){await perform(async()=>{const value=await chooseExportDirectory();if(value){setExportSettings(value);setToast(`导出文件夹已设置：${value.directory}`);}});}
++  async function resetFolder(){await perform(async()=>{const value=await resetExportDirectory();setExportSettings(value);setToast('导出文件夹已恢复默认');});}
+   async function inspectCli(){setChecking(true);try{setDoctor(await checkCli());}catch(error){setToast(errorText(error));}finally{setChecking(false);}}
+   async function create(title:string,prompt:string,newScene:Scene){await perform(async()=>{const next=await createReal(title,prompt,newScene);setTasks(current=>[next,...current]);select(next);setView('tasks');setScene('all');setTaskFilter('all');setQuery('');setModal(false);});}
+   async function saveDocument(expected:string,content:string):Promise<Artifact>{
+@@ -113,12 +118,12 @@
+       </nav>
+       <div className="nav-section scenes-label">任务场景</div>
+       <nav aria-label="场景筛选">{(['all','research','coding','writing'] as const).map(s=><button key={s} className={`nav-item scene-item ${scene===s&&view==='tasks'?'selected-scene':''}`} onClick={()=>{setScene(s);setView('tasks');}}><span className={`scene-dot ${s}`}/>{s==='all'?'全部场景':sceneLabels[s]}</button>)}</nav>
+-      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>本地工作空间</strong><p>{!desktop?'浏览器仅预览界面':persistence.current?'任务记录自动保存在此设备':'保存不可用，当前修改暂存内存'}</p></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><img src="/orbit.svg" alt=""/><div>Orbit<small>版本 0.1 · 本地工作台</small></div></div></div>
++      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>本地工作空间</strong><p>{!desktop?'浏览器仅预览界面':persistence.current?'任务记录自动保存在此设备':'保存不可用，当前修改暂存内存'}</p></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>设置</button><div className="profile"><img src="/orbit.svg" alt=""/><div>Orbit<small>版本 0.1 · 本地工作台</small></div></div></div>
+     </aside>
+     <main className="main-shell">
+-      <header className="topbar"><div className="breadcrumb">Orbit <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button></div></header>
++      <header className="topbar"><div className="breadcrumb">Orbit <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button></div></header>
+       <div className="page-content">
+-        <div className="page-heading"><div><h1>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</h1><p>{view==='tasks'?'查看进度、协作与结果。':view==='archive'?'查看已归档的交付，导出或删除任务。':view==='attention'?'处理 Agent 的审批与信息请求。':view==='artifacts'?'预览、编辑和保存任务成果。':'连接本机 Codex，管理执行方式。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
++        <div className="page-heading"><div><h1>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'设置'}</h1><p>{view==='tasks'?'查看进度、协作与结果。':view==='archive'?'查看已归档的交付，导出或删除任务。':view==='attention'?'处理 Agent 的审批与信息请求。':view==='artifacts'?'预览、编辑和保存任务成果。':'管理导出位置与本机 Codex 执行方式。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
+         <div className="workspace-summary" aria-label="工作空间概览"><span><span className="status-dot running"/><strong>{active}</strong> 进行中</span><button onClick={()=>setView('attention')}><Bell size={14}/><strong>{attention.length}</strong> 待介入</button><button onClick={()=>setView('artifacts')}><FileText size={14}/><strong>{deliveries.length}</strong> 份交付</button></div>
+ 
+         {(view==='tasks'||view==='archive')&&<div className="workbench">
+@@ -138,7 +143,7 @@
+ 
+         {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">Codex · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p><RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/></div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
+         {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">任务实际生成的交付</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">Codex 输出</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>还没有交付物</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
+-        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器仅预览界面；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>同一时间执行一个根任务。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
++        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><ExportDirectorySettings value={exportSettings} desktop={desktop} busy={busy} onChoose={chooseFolder} onReset={resetFolder}/><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器仅预览界面；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>同一时间执行一个根任务。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
+         <footer className="page-footer"><span><ShieldCheck size={12}/>{!desktop?'桌面 App 中保存任务记录':persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit <span>·</span> 个人 Agent 工作台</span></footer>
+       </div>
+     </main>
+--- src/styles.css.before
++++ src/styles.css
+@@ -474,3 +474,8 @@
+ .chat-composer > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px 10px 14px; }
+ .chat-composer > div > span { color: var(--muted); font-size: 10px; }
+ @media (max-width: 700px) { .task-chat { margin-inline: 16px; } .chat-history, .chat-composer-area { padding-inline: 12px; } .chat-message.user { width: 95%; } .chat-composer > div { flex-wrap: wrap; } }
++
++.export-directory-setting > div:first-child { min-width: 0; flex: 1; }
++.export-directory-path { display: block; padding: 10px 12px; margin: 10px 0 7px; border: 1px solid var(--border); border-radius: 8px; background: #f6f7f9; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
++.export-directory-actions { display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
++.chat-failure-detail { margin-top: 8px; display: block; overflow-wrap: anywhere; }
+--- src/ExportDirectorySettings.tsx.before
++++ src/ExportDirectorySettings.tsx
+@@ -0,0 +1,13 @@
++import { FolderOpen, Loader2 } from 'lucide-react';
++import type { ExportSettings } from './bridge';
++
++type Props={value:ExportSettings|null;desktop:boolean;busy:boolean;onChoose:()=>void;onReset:()=>void};
++export function ExportDirectorySettings({value,desktop,busy,onChoose,onReset}:Props) {
++  return <div className="settings-line export-directory-setting">
++    <div><strong>导出文件夹</strong><p>交付文档和归档任务统一保存到此位置，重启后仍然生效。</p>
++      <code className="export-directory-path">{value?.directory||(desktop?'正在读取导出位置…':'在桌面 App 中选择导出文件夹')}</code>
++      {value&&<small className="subtle">{value.custom?'自定义位置':'默认位置'}</small>}
++    </div>
++    <div className="export-directory-actions"><button className="secondary-button" disabled={!desktop||busy||!value} onClick={onChoose}>{busy?<Loader2 className="spin" size={15}/>:<FolderOpen size={15}/>}选择文件夹</button><button className="secondary-button" disabled={!desktop||busy||!value?.custom} onClick={onReset}>恢复默认</button></div>
++  </div>;
++}
+--- src/TaskChat.render-check.mjs.before
++++ src/TaskChat.render-check.mjs
+@@ -22,5 +22,17 @@
+   assert(!archived.includes('发送并继续交付'));
+   assert(render({task:{...task,status:'running'}}).includes('disabled=""'));
+   assert(render({desktop:false}).includes('disabled=""'));
++  const failed=render({task:{...task,status:'failed',turnId:null,events:[{kind:'error',text:'thread thread already has an active writer'}]}});
++  assert(failed.includes('already has an active writer'));
++  assert(failed.includes('使用上次补充内容'));
++  assert(render({task:{...task,supplements:[{...task.supplements[0],sourceThreadId:'source'}]}}).includes('已复制历史到续接分支'));
++  const {ExportDirectorySettings}=await server.ssrLoadModule('/src/ExportDirectorySettings.tsx');
++  const folderProps={value:{directory:'/Users/test/交付 folder',custom:true},desktop:true,busy:false,onChoose:()=>{},onReset:()=>{}};
++  const folder=renderToStaticMarkup(React.createElement(ExportDirectorySettings,folderProps));
++  assert(folder.includes('/Users/test/交付 folder'));
++  assert(folder.includes('选择文件夹')&&folder.includes('恢复默认')&&folder.includes('自定义位置'));
++  assert(!folder.includes('disabled=""'));
++  assert(renderToStaticMarkup(React.createElement(ExportDirectorySettings,{...folderProps,desktop:false})).includes('disabled=""'));
++  console.log('Export settings and chat render checks passed: saved path, browser guards, branch notice and retry draft.');
+   console.log('TaskChat render checks passed: history, confirmations, archive and running/browser guards.');
+ } finally { await server.close(); }
+--- src/model.ts.before
++++ src/model.ts
+@@ -5,7 +5,7 @@
+ export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
+ export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
+ export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
+-export interface Supplement { runId:string; previousTurnId:string; text:string; createdAt:number }
++export interface Supplement { sourceThreadId?:string|null; runId:string; previousTurnId:string; text:string; createdAt:number }
+ export interface Direction { id:string; runId:string; turnId:string; text:string; status:'pending'|'accepted'|'rejected'|'unknown'; createdAt:number }
+ export interface Task { directions?:Direction[]; supplements?:Supplement[]; supersededRunId?:string|null; id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+ export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
+--- src/bridge.ts.before
++++ src/bridge.ts
+@@ -31,3 +31,8 @@
+ export const deleteTask=(taskId:string)=>invoke('delete_task',{taskId});
+ 
+ export const continueReal=(task:Task,text:string)=>invoke<Task>('continue_task',{taskId:task.id,revision:task.revision,runId:task.runId,turnId:task.turnId,text});
++
++export interface ExportSettings { directory:string; custom:boolean }
++export const getExportSettings=()=>invoke<ExportSettings>('get_export_settings');
++export const chooseExportDirectory=()=>invoke<ExportSettings|null>('choose_export_directory');
++export const resetExportDirectory=()=>invoke<ExportSettings>('reset_export_directory');
+--- src/TaskChat.tsx.before
++++ src/TaskChat.tsx
+@@ -9,10 +9,12 @@
+   const historyRef=useRef<HTMLDivElement>(null);
+   const supplements=task.supplements||[];
+   useEffect(()=>{const history=historyRef.current;if(history)history.scrollTop=history.scrollHeight;},[task.id,task.artifacts.length,supplements.length,task.directions?.length]);
+-  const history=[...supplements.map(s=>({id:s.runId,at:s.createdAt,text:s.text,artifact:null as Artifact|null,status:''})),...(task.directions||[]).map(d=>({id:d.id,at:d.createdAt,text:d.text,artifact:null as Artifact|null,status:({pending:'等待执行器确认',accepted:'执行器已确认 · 请在交付中核对采用情况',rejected:'执行器已拒绝',unknown:'确认未知 · 请勿重复发送'})[d.status]})),...task.artifacts.map(a=>({id:a.id,at:a.createdAt,text:'',artifact:a,status:''}))].sort((a,b)=>a.at-b.at);
++  const history=[...supplements.map(s=>({id:s.runId,at:s.createdAt,text:s.text,artifact:null as Artifact|null,status:s.sourceThreadId?'原会话被占用 · 已复制历史到续接分支':''})),...(task.directions||[]).map(d=>({id:d.id,at:d.createdAt,text:d.text,artifact:null as Artifact|null,status:({pending:'等待执行器确认',accepted:'执行器已确认 · 请在交付中核对采用情况',rejected:'执行器已拒绝',unknown:'确认未知 · 请勿重复发送'})[d.status]})),...task.artifacts.map(a=>({id:a.id,at:a.createdAt,text:'',artifact:a,status:''}))].sort((a,b)=>a.at-b.at);
+   const available=canContinue(task);
++  const failure=task.status==='failed'?task.events.filter(event=>event.kind==='error').at(-1)?.text:undefined;
++  const retry=task.status==='failed'&&!task.turnId?supplements.at(-1):undefined;
+   const limit=task.artifacts.length>=10||supplements.length>=10;
+-  const notice=task.archived?'已归档 · 对话只读':isActive(task.status)?'正在生成下一份交付，请等待本轮结束':limit?'已达到 10 份交付或 10 次补充上限，请新建任务':available?'补充背景、调整要求，继续在原会话中交付':'当前会话无法安全续接，请核对状态后新建任务';
++  const notice=task.archived?'已归档 · 对话只读':isActive(task.status)?'正在生成下一份交付，请等待本轮结束':limit?'已达到 10 份交付或 10 次补充上限，请新建任务':available?'补充背景、调整要求，继续交付；原会话被占用时会复制历史到新分支':'当前会话无法安全续接，请核对状态后新建任务';
+   return <section className="task-chat" aria-label="任务对话">
+     <div className="panel-heading"><h2><MessageCircle size={15}/>任务对话</h2><span className="subtle">{task.artifacts.length} 份交付版本</span></div>
+     <div className="chat-history" ref={historyRef}>
+@@ -22,9 +24,9 @@
+         <button className="chat-document-link" onClick={()=>onOpen(item.artifact!)}>打开文档{task.archived?' · 预览 / 导出':' · 预览 / 编辑 / 导出'}</button>
+       </div>:<div key={item.id} className="chat-message user"><span className="chat-label">你 · 补充信息</span><p>{item.text}</p>{item.status&&<small className="chat-label direction-status">{item.status}</small>}</div>)}
+       {isActive(task.status)&&<div className="chat-progress" role="status"><Loader2 className="spin" size={14}/>Codex 正在处理，交付生成后会出现在这里</div>}
+-      {(task.status==='failed'||task.status==='interrupted'||task.status==='unknown')&&<p className="chat-attempt-notice">本轮{task.status==='failed'?'失败':task.status==='interrupted'?'已中断':'结果需核对'}，已有交付版本保留。补充记录表示已提交给工作台，不代表模型已成功处理。</p>}
++      {(task.status==='failed'||task.status==='interrupted'||task.status==='unknown')&&<p className="chat-attempt-notice">本轮{task.status==='failed'?'失败':task.status==='interrupted'?'已中断':'结果需核对'}，已有交付版本保留。补充记录表示已提交给工作台，不代表模型已成功处理。{failure&&<span className="chat-failure-detail">{failure}</span>}</p>}
+     </div>
+-    <div className="chat-composer-area"><p className="chat-composer-notice">{notice}</p>
++    <div className="chat-composer-area"><p className="chat-composer-notice">{notice}</p>{retry&&available&&!task.archived&&<button type="button" className="chat-document-link" disabled={busy||!desktop} onClick={()=>onChange(retry.text)}>使用上次补充内容</button>}
+       {!task.archived&&<form className="chat-composer" onSubmit={event=>{event.preventDefault();if(available&&!busy&&desktop&&draft.trim())onSend();}}>
+         <textarea aria-label="补充信息继续交付" placeholder="例如：预算控制在 500 元以内，补充比较表，并更新结论…" rows={3} maxLength={2000} value={draft} disabled={busy||!available||!desktop} onChange={event=>onChange(event.target.value)}/>
+         <div><span>{supplements.length}/10 次补充 · {draft.length}/2000 字</span><button className="primary-button compact" disabled={busy||!desktop||!available||!draft.trim()}>{busy?<Loader2 size={14} className="spin"/>:<Send size={14}/>}发送并继续交付</button></div>
+--- src-tauri/src/lib.rs.before
++++ src-tauri/src/lib.rs
+@@ -10,9 +10,10 @@
+     use super::{
+         model::Task,
+         runner::{self, Runtime},
+-        store::{Store, Workspace},
++        store::{ExportSettings, Store, Workspace},
+     };
+     use tauri::{AppHandle, Manager, State};
++    use tauri_plugin_dialog::DialogExt;
+ 
+     #[tauri::command]
+     fn load_workspace(runtime: State<Runtime>) -> Workspace {
+@@ -41,6 +42,40 @@
+         content: String,
+     ) -> Result<Task, String> {
+         runtime.edit_artifact(artifact_id, expected_content, content)
++    }
++    #[tauri::command]
++    fn get_export_settings(runtime: State<Runtime>) -> ExportSettings {
++        runtime.store.export_settings()
++    }
++    #[tauri::command]
++    fn reset_export_directory(runtime: State<Runtime>) -> Result<ExportSettings, String> {
++        runtime.store.set_export_directory(None)
++    }
++    #[tauri::command]
++    async fn choose_export_directory(
++        app: AppHandle,
++        runtime: State<'_, Runtime>,
++    ) -> Result<Option<ExportSettings>, String> {
++        let store = runtime.store.clone();
++        tauri::async_runtime::spawn_blocking(move || {
++            let current = store.export_settings();
++            let mut dialog = app.dialog().file().set_title("选择导出文件夹");
++            let current = std::path::PathBuf::from(current.directory);
++            if current.is_dir() {
++                dialog = dialog.set_directory(&current);
++            }
++            if let Some(window) = app.get_webview_window("main") {
++                dialog = dialog.set_parent(&window);
++            }
++            match dialog.blocking_pick_folder() {
++                Some(path) => store
++                    .set_export_directory(Some(path.into_path().map_err(|_| "请选择本机文件夹")?))
++                    .map(Some),
++                None => Ok(None),
++            }
++        })
++        .await
++        .map_err(|_| "文件夹选择失败".to_string())?
+     }
+     #[tauri::command]
+     fn export_artifact(runtime: State<Runtime>, artifact_id: String) -> Result<String, String> {
+@@ -129,6 +164,7 @@
+             return;
+         }
+         let app = tauri::Builder::default()
++            .plugin(tauri_plugin_dialog::init())
+             .setup(|app| {
+                 let directory = app.path().app_data_dir()?;
+                 let store = Store::open(directory).map_err(std::io::Error::other)?;
+@@ -137,6 +173,9 @@
+             })
+             .invoke_handler(tauri::generate_handler![
+                 load_workspace,
++                get_export_settings,
++                choose_export_directory,
++                reset_export_directory,
+                 archive_task,
+                 delete_task,
+                 export_artifact,
+--- src-tauri/src/store.rs.before
++++ src-tauri/src/store.rs
+@@ -13,11 +13,20 @@
+     pub tasks: Vec<Task>,
+     #[serde(default)]
+     pub error: Option<String>,
++    #[serde(default, rename = "exportDirectory")]
++    pub export_directory: Option<PathBuf>,
+ }
+ #[derive(Serialize, Deserialize)]
+ struct Disk {
+     version: u32,
+     tasks: Vec<Task>,
++    #[serde(default, rename = "exportDirectory")]
++    export_directory: Option<PathBuf>,
++}
++#[derive(Serialize)]
++pub struct ExportSettings {
++    pub directory: String,
++    pub custom: bool,
+ }
+ pub struct Store {
+     pub directory: PathBuf,
+@@ -29,7 +38,7 @@
+         fs::create_dir_all(&directory).map_err(|_| "无法创建本地记录目录".to_string())?;
+         let file = directory.join("workspace.json");
+         let data = if file.exists() {
+-            let read = (|| -> Result<Vec<Task>, String> {
++            let read = (|| -> Result<Workspace, String> {
+                 let mut bytes = Vec::new();
+                 File::open(&file)
+                     .map_err(|_| "无法读取记录")?
+@@ -52,12 +61,17 @@
+                     validate(task)?;
+                     task.recover();
+                 }
+-                Ok(tasks)
++                Ok(Workspace {
++                    tasks,
++                    error: None,
++                    export_directory: disk.export_directory,
++                })
+             })();
+             match read {
+-                Ok(tasks) => Workspace { tasks, error: None },
++                Ok(workspace) => workspace,
+                 Err(reason) => Workspace {
+                     tasks: vec![],
++                    export_directory: None,
+                     error: Some(format!("{}，原文件已保留。当前操作暂存内存。", reason)),
+                 },
+             }
+@@ -251,6 +265,55 @@
+         *data = candidate;
+         Ok(saved)
+     }
++    pub fn export_settings(&self) -> ExportSettings {
++        let data = self.data.lock().unwrap();
++        self.settings_for(&data)
++    }
++    fn settings_for(&self, data: &Workspace) -> ExportSettings {
++        ExportSettings {
++            directory: data
++                .export_directory
++                .as_ref()
++                .unwrap_or(&self.directory.join("exports"))
++                .display()
++                .to_string(),
++            custom: data.export_directory.is_some(),
++        }
++    }
++    pub fn set_export_directory(
++        &self,
++        selected: Option<PathBuf>,
++    ) -> Result<ExportSettings, String> {
++        let selected = match selected {
++            Some(path) => {
++                if !path.is_absolute() {
++                    return Err("请选择绝对路径的文件夹".into());
++                }
++                let path = path
++                    .canonicalize()
++                    .map_err(|_| "所选文件夹不存在或无法访问")?;
++                if !path.is_dir() || path.to_str().is_none_or(|s| s.len() > 4096) {
++                    return Err("所选路径不是有效的文件夹".into());
++                }
++                let probe = path.join(format!(".orbit-write-check-{}", uuid::Uuid::new_v4()));
++                let file = fs::OpenOptions::new()
++                    .write(true)
++                    .create_new(true)
++                    .open(&probe)
++                    .map_err(|_| "所选文件夹不可写，请选择其他文件夹")?;
++                drop(file);
++                fs::remove_file(&probe).map_err(|_| "无法清理文件夹写入检查，请选择其他文件夹")?;
++                Some(path)
++            }
++            None => None,
++        };
++        let mut data = self.data.lock().unwrap();
++        let mut candidate = data.clone();
++        candidate.export_directory = selected;
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(self.settings_for(&data))
++    }
+     pub fn export_artifact(&self, id: &str) -> Result<String, String> {
+         let data = self.data.lock().unwrap();
+         let artifact = data
+@@ -262,18 +325,27 @@
+         if artifact.content.len() > 256000 {
+             return Err("交付物超出导出大小限制".into());
+         }
+-        let directory = self.directory.join("exports");
+-        fs::create_dir_all(&directory).map_err(|_| "无法创建导出目录".to_string())?;
+-        let root = self
+-            .directory
+-            .canonicalize()
+-            .map_err(|_| "无法解析本地目录".to_string())?;
+-        let directory = directory
+-            .canonicalize()
+-            .map_err(|_| "无法解析导出目录".to_string())?;
+-        if !directory.starts_with(root) {
+-            return Err("导出目录位于工作台目录之外".into());
+-        }
++        let directory = if let Some(selected) = &data.export_directory {
++            let actual = selected
++                .canonicalize()
++                .map_err(|_| "导出文件夹已失效，请在设置中重新选择")?;
++            if &actual != selected || !actual.is_dir() {
++                return Err("导出文件夹已变化，请在设置中重新选择".into());
++            }
++            actual
++        } else {
++            let directory = self.directory.join("exports");
++            fs::create_dir_all(&directory).map_err(|_| "无法创建导出目录".to_string())?;
++            let root = self
++                .directory
++                .canonicalize()
++                .map_err(|_| "无法解析本地目录")?;
++            let directory = directory.canonicalize().map_err(|_| "无法解析导出目录")?;
++            if !directory.starts_with(root) {
++                return Err("导出目录位于工作台目录之外".into());
++            }
++            directory
++        };
+         let name: String = artifact
+             .name
+             .chars()
+@@ -291,9 +363,15 @@
+             .create_new(true)
+             .open(&destination)
+             .map_err(|_| "无法保存交付文件".to_string())?;
+-        file.write_all(artifact.content.as_bytes())
++        if file
++            .write_all(artifact.content.as_bytes())
+             .and_then(|_| file.sync_all())
+-            .map_err(|_| "交付文件写入失败".to_string())?;
++            .is_err()
++        {
++            drop(file);
++            let _ = fs::remove_file(&destination);
++            return Err("交付文件写入失败".into());
++        }
+         Ok(destination.display().to_string())
+     }
+     fn persist(&self, data: &Workspace) -> Result<(), String> {
+@@ -311,8 +389,12 @@
+                 task
+             })
+             .collect();
+-        let bytes = serde_json::to_vec(&Disk { version: 1, tasks })
+-            .map_err(|_| "无法编码记录".to_string())?;
++        let bytes = serde_json::to_vec(&Disk {
++            version: 1,
++            tasks,
++            export_directory: data.export_directory.clone(),
++        })
++        .map_err(|_| "无法编码记录".to_string())?;
+         if bytes.len() as u64 > MAX_STORE {
+             return Err("记录超过 8 MiB，原文件保留".into());
+         }
+@@ -382,7 +464,10 @@
+         })
+         || task.supplements.len() > 10
+         || task.supplements.iter().any(|s| {
+-            s.run_id.is_empty()
++            s.source_thread_id
++                .as_ref()
++                .is_some_and(|id| id.is_empty() || id.len() > 100)
++                || s.run_id.is_empty()
+                 || s.run_id.len() > 100
+                 || s.previous_turn_id.is_empty()
+                 || s.previous_turn_id.len() > 100
+@@ -412,6 +497,113 @@
+             created_at: 0,
+         });
+         task
++    }
++    #[test]
++    fn export_folder_settings_are_atomic_and_invalid_folder_does_not_hide_tasks() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let task = document();
++        store.save_task(task.clone()).unwrap();
++        let chosen = directory.with_extension("outside exports");
++        fs::create_dir(&chosen).unwrap();
++        let canonical = chosen.canonicalize().unwrap();
++        assert!(!store.export_settings().custom);
++        assert!(store
++            .set_export_directory(Some(PathBuf::from("relative")))
++            .is_err());
++        assert!(store
++            .set_export_directory(Some(directory.join("missing")))
++            .is_err());
++        assert!(store
++            .set_export_directory(Some(directory.join("workspace.json")))
++            .is_err());
++        fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store.set_export_directory(Some(chosen.clone())).is_err());
++        assert!(!store.export_settings().custom);
++        assert_eq!(fs::read_dir(&chosen).unwrap().count(), 0);
++        fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(
++            store
++                .set_export_directory(Some(chosen.clone()))
++                .unwrap()
++                .custom
++        );
++        store.save_task(task.clone()).unwrap();
++        let reopened = Store::open(directory.clone()).unwrap();
++        assert_eq!(
++            PathBuf::from(reopened.export_settings().directory),
++            canonical
++        );
++        reopened.archive_task(&task.id).unwrap();
++        let first = PathBuf::from(reopened.export_artifact("doc").unwrap());
++        let second = PathBuf::from(reopened.export_artifact("doc").unwrap());
++        assert_eq!(first.parent().unwrap(), canonical);
++        assert_ne!(first, second);
++        assert_eq!(fs::read_to_string(&first).unwrap(), "# Original");
++        fs::remove_dir_all(&chosen).unwrap();
++        let offline = Store::open(directory.clone()).unwrap();
++        assert_eq!(offline.workspace().tasks.len(), 1);
++        assert!(offline.workspace().error.is_none());
++        assert!(offline.export_settings().custom);
++        assert!(offline.export_artifact("doc").unwrap_err().contains("失效"));
++        offline.set_export_directory(None).unwrap();
++        let default = PathBuf::from(offline.export_artifact("doc").unwrap());
++        assert_eq!(
++            default.parent().unwrap(),
++            directory.canonicalize().unwrap().join("exports")
++        );
++        assert!(
++            !Store::open(directory.clone())
++                .unwrap()
++                .export_settings()
++                .custom
++        );
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[cfg(unix)]
++    fn export_rejects_replaced_custom_and_redirected_default_folders() {
++        use std::os::unix::fs::symlink;
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        store.save_task(document()).unwrap();
++        let chosen = directory.join("chosen");
++        let other = directory.with_extension("other");
++        fs::create_dir(&chosen).unwrap();
++        fs::create_dir(&other).unwrap();
++        store.set_export_directory(Some(chosen.clone())).unwrap();
++        fs::remove_dir(&chosen).unwrap();
++        symlink(&other, &chosen).unwrap();
++        assert!(store.export_artifact("doc").is_err());
++        assert_eq!(fs::read_dir(&other).unwrap().count(), 0);
++        store.set_export_directory(None).unwrap();
++        symlink(&other, directory.join("exports")).unwrap();
++        assert!(store.export_artifact("doc").is_err());
++        assert_eq!(fs::read_dir(&other).unwrap().count(), 0);
++        fs::remove_dir_all(directory).unwrap();
++        fs::remove_dir_all(other).unwrap();
++    }
++    #[test]
++    fn configured_export_folder_is_used_after_reopen() {
++        let directory = directory();
++        drop(Store::open(directory.clone()).unwrap());
++        let chosen = directory.join("chosen 中文 folder");
++        fs::create_dir(&chosen).unwrap();
++        let task = document();
++        fs::write(
++            directory.join("workspace.json"),
++            serde_json::to_vec(&serde_json::json!({
++            "version":1,"tasks":[task],"exportDirectory":chosen.canonicalize().unwrap()
++            }))
++            .unwrap(),
++        )
++        .unwrap();
++        let store = Store::open(directory.clone()).unwrap();
++        assert!(store.workspace().error.is_none());
++        let exported = PathBuf::from(store.export_artifact("doc").unwrap());
++        assert_eq!(exported.parent().unwrap(), chosen.canonicalize().unwrap());
++        assert_eq!(fs::read_to_string(exported).unwrap(), "# Original");
++        fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+     fn completed_message_is_persisted_before_any_later_turn_event() {
+@@ -538,6 +730,7 @@
+         demo.artifacts[0].content = "sample content".into();
+         let file = directory.join("workspace.json");
+         let bytes = serde_json::to_vec(&Disk {
++            export_directory: None,
+             version: 1,
+             tasks: vec![demo.clone(), real.clone()],
+         })
+@@ -565,6 +758,7 @@
+         let disk: Disk = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+         assert!(disk.tasks.iter().all(|t| t.provider == "codex"));
+         let bytes = serde_json::to_vec(&Disk {
++            export_directory: None,
+             version: 1,
+             tasks: vec![demo],
+         })
+@@ -590,6 +784,7 @@
+             let mut demo = document();
+             demo.provider = "demo".into();
+             let bytes = serde_json::to_vec(&Disk {
++                export_directory: None,
+                 version: 1,
+                 tasks: vec![demo, real],
+             })
+--- src-tauri/src/runner.rs.before
++++ src-tauri/src/runner.rs
+@@ -22,6 +22,8 @@
+ #[derive(PartialEq)]
+ enum Startup {
+     Connecting,
++    ReadingSource,
++    Forking,
+     AwaitingTurn,
+     Running,
+ }
+@@ -34,6 +36,8 @@
+     controls: HashMap<u64, String>,
+     next_id: u64,
+     model_cursors: Vec<String>,
++    requested_model: Option<String>,
++    fork_anchor: Option<Value>,
+     closed: bool,
+     last_emit: Instant,
+     resume_turn: Option<String>,
+@@ -43,32 +47,111 @@
+ }
+ 
+ impl Run {
+-    fn thread_request(&self, directory: &std::path::Path, model: &str) -> Value {
++    fn thread_request(&mut self, directory: &std::path::Path, model: &str) -> Value {
++        self.requested_model = Some(model.into());
+         match &self.resume_turn {
+             Some(_) => resume_request(self.task.thread_id.as_deref().unwrap(), model),
+             None => thread_request(directory, model),
+         }
+     }
+-    fn start_turn(&mut self, result: &Value) -> Result<Value, String> {
++    fn recover_writer(&mut self, id: u64, detail: &str) -> Option<Value> {
++        let source = self.task.thread_id.as_deref()?;
++        if id != 2
++            || self.startup != Startup::Connecting
++            || self.closed
++            || self.resume_turn.is_none()
++            || self.requested_model.is_none()
++            || detail != format!("thread {source} already has an active writer")
++        {
++            return None;
++        }
++        let request =
++            json!({"id":5,"method":"thread/read","params":{"threadId":source,"includeTurns":true}});
++        self.startup = Startup::ReadingSource;
++        self.task.event(
++            "原会话被其他执行器占用，正在核对已完成的历史",
++            "system",
++            "工作台",
++        );
++        Some(request)
++    }
++    fn request_fork(&mut self, result: &Value) -> Result<Value, String> {
++        if self.startup != Startup::ReadingSource {
++            return Err("会话历史响应阶段不匹配".into());
++        }
++        let source = self.task.thread_id.as_deref().ok_or("原会话标识缺失")?;
++        let anchor = self.resume_turn.as_deref().ok_or("原会话轮次缺失")?;
++        let mut thread = result["thread"].clone();
++        if !matches!(
++            thread["status"]["type"].as_str(),
++            Some("idle" | "notLoaded")
++        ) {
++            return Err("原会话仍在执行，已停止复制历史；请等待它结束".into());
++        }
++        thread["status"]["type"] = json!("idle");
++        validate_resume(&thread, source, anchor)?;
++        let mut request = resume_request(
++            source,
++            self.requested_model.as_deref().ok_or("请求模型缺失")?,
++        );
++        request["id"] = json!(6);
++        request["method"] = json!("thread/fork");
++        request["params"]["lastTurnId"] = json!(anchor);
++        request["params"]["deferGoalContinuation"] = json!(true);
++        self.fork_anchor = thread["turns"]
++            .as_array()
++            .and_then(|turns| turns.last())
++            .cloned();
++        self.startup = Startup::Forking;
++        Ok(request)
++    }
++    fn prepare_turn(&self, result: &Value, fork: bool) -> Result<(Task, Value), String> {
+         let thread = &result["thread"];
+         let id = thread["id"]
+             .as_str()
+-            .filter(|id| !id.is_empty())
++            .filter(|id| !id.is_empty() && id.len() <= 100)
+             .ok_or("执行器未返回有效 thread ID")?;
+         if let Some(anchor) = &self.resume_turn {
+-            validate_resume(thread, self.task.thread_id.as_deref().unwrap(), anchor)?;
+-        }
+-        self.task.thread_id = Some(id.into());
+-        self.task.root_node();
+-        self.task.nodes[0].model = result["model"].as_str().unwrap_or("实际模型未返回").into();
++            let source = self.task.thread_id.as_deref().ok_or("原会话标识缺失")?;
++            if fork {
++                if id == source
++                    || thread["forkedFromId"] != source
++                    || thread["turns"].as_array().and_then(|turns| turns.last())
++                        != self.fork_anchor.as_ref()
++                {
++                    return Err("续接分支来源或历史不匹配，已停止发送补充".into());
++                }
++                validate_resume(thread, id, anchor)?;
++            } else {
++                validate_resume(thread, source, anchor)?;
++            }
++        }
++        let mut task = self.task.clone();
++        if fork {
++            let source = task.thread_id.clone();
++            task.supplements
++                .last_mut()
++                .ok_or("补充记录缺失")?
++                .source_thread_id = source;
++            task.event(
++                "原会话被占用，已复制完成的历史创建续接分支；已有交付保留",
++                "system",
++                "工作台",
++            );
++        }
++        task.thread_id = Some(id.into());
++        task.root_node();
++        task.nodes[0].model = result["model"].as_str().unwrap_or("实际模型未返回").into();
+         let text = if self.resume_turn.is_some() {
+-            &self.task.supplements.last().unwrap().text
++            &task.supplements.last().ok_or("补充记录缺失")?.text
+         } else {
+-            &self.task.prompt
++            &task.prompt
+         };
+         let request = turn_request(id, text);
+-        self.task.event(
+-            if self.resume_turn.is_some() {
++        task.event(
++            if fork {
++                "续接分支已保存，发送补充信息"
++            } else if self.resume_turn.is_some() {
+                 "原会话已续接，发送补充信息"
+             } else {
+                 "会话已创建，启动任务"
+@@ -76,6 +159,26 @@
+             "system",
+             "工作台",
+         );
++        Ok((task, request))
++    }
++    fn start_turn(&mut self, result: &Value) -> Result<Value, String> {
++        if self.startup != Startup::Connecting || self.requested_model.is_none() {
++            return Err("会话响应阶段不匹配".into());
++        }
++        let (task, request) = self.prepare_turn(result, false)?;
++        self.task = task;
++        self.startup = Startup::AwaitingTurn;
++        Ok(request)
++    }
++    fn start_forked_turn(&mut self, result: &Value, store: &Store) -> Result<Value, String> {
++        if self.startup != Startup::Forking {
++            return Err("分支响应阶段不匹配".into());
++        }
++        let (candidate, request) = self.prepare_turn(result, true)?;
++        let saved = store
++            .save_existing_task(candidate)?
++            .ok_or("任务记录已变化，未发送补充")?;
++        self.task = saved;
+         self.startup = Startup::AwaitingTurn;
+         Ok(request)
+     }
+@@ -97,7 +200,7 @@
+         if message.get("method").is_none() || self.startup == Startup::Running {
+             return Ok(false);
+         }
+-        if self.startup == Startup::Connecting {
++        if self.startup != Startup::AwaitingTurn {
+             return Ok(true);
+         }
+         let bytes = message.to_string().len();
+@@ -298,6 +401,16 @@
+     #[test]
+     #[ignore = "explicit two-turn inference check using own test thread, no tools or user task"]
+     fn local_continuation_with_real_cli() {
++        check_real_continuation(false);
++    }
++    #[test]
++    #[ignore = "explicit occupied-writer continuation on own no-tool test session"]
++    fn local_occupied_writer_continuation_with_real_cli() {
++        check_real_continuation(true);
++    }
++    fn check_real_continuation(occupied: bool) {
++        let mut retained_writer = None;
++        let mut retained_thread = None;
+         let directory =
+             std::env::temp_dir().join(format!("orbit-real-continuation-{}", uuid::Uuid::new_v4()));
+         let store = Store::open(directory.clone()).unwrap();
+@@ -353,6 +466,8 @@
+                 controls: HashMap::new(),
+                 next_id: 100,
+                 model_cursors: Vec::new(),
++                requested_model: None,
++                fork_anchor: None,
+                 closed: false,
+                 last_emit: Instant::now(),
+                 resume_turn,
+@@ -369,7 +484,12 @@
+                     .unwrap()
+                     .expect("CLI closed before completion");
+                 if message.get("error").is_some() {
+-                    panic!("{}", error_message(&message["error"]));
++                    let detail = error_message(&message["error"]);
++                    let request = run
++                        .recover_writer(message["id"].as_u64().unwrap(), &detail)
++                        .unwrap_or_else(|| panic!("{}", message));
++                    send(&mut run.input, &request).unwrap();
++                    continue;
+                 }
+                 if run.defer_notification(&message).unwrap() {
+                     continue;
+@@ -394,6 +514,8 @@
+                             }
+                         }
+                         2 => Some(run.start_turn(&message["result"]).unwrap()),
++                        5 => Some(run.request_fork(&message["result"]).unwrap()),
++                        6 => Some(run.start_forked_turn(&message["result"], &store).unwrap()),
+                         3 => {
+                             for deferred in run.accept_turn(&message["result"]).unwrap() {
+                                 project(&mut run.task, &deferred);
+@@ -412,9 +534,22 @@
+             assert_eq!(run.task.status, "completed");
+             let expected = if round == 0 { "FIRST_OK" } else { "SECOND_OK" };
+             assert_eq!(run.task.artifacts.last().unwrap().content.trim(), expected);
+-            run.child.stop().unwrap();
++            if occupied && round == 0 {
++                retained_thread = run.task.thread_id.clone();
++                retained_writer = Some((run.child, run.input));
++            } else {
++                run.child.stop().unwrap();
++            }
+             task = run.task;
+             store.save_existing_task(task.clone()).unwrap().unwrap();
++        }
++        if occupied {
++            assert_eq!(
++                task.supplements.last().unwrap().source_thread_id,
++                retained_thread
++            );
++            assert_ne!(task.thread_id, retained_thread);
++            retained_writer.as_mut().unwrap().0.stop().unwrap();
+         }
+         assert_eq!(task.artifacts.len(), 2);
+         assert_eq!(task.artifacts[0].content.trim(), "FIRST_OK");
+@@ -424,7 +559,14 @@
+             Some(task.supplements[0].previous_turn_id.as_str())
+         );
+         std::fs::remove_dir_all(directory).unwrap();
+-        println!("Confirmed actual CLI: original thread resumed, new turn completed, FIRST_OK and SECOND_OK retained.");
++        println!(
++            "Confirmed actual CLI: {} completed; FIRST_OK and SECOND_OK retained.",
++            if occupied {
++                "occupied source forked through its pinned history"
++            } else {
++                "original thread resumed"
++            }
++        );
+     }
+     #[test]
+     fn startup_buffer_overflow_is_explicit_and_pending_directions_recover_unknown() {
+@@ -657,6 +799,8 @@
+             controls: HashMap::new(),
+             next_id: 100,
+             model_cursors: Vec::new(),
++            requested_model: None,
++            fork_anchor: None,
+             closed: false,
+             last_emit: Instant::now(),
+             resume_turn: None,
+@@ -664,6 +808,142 @@
+             buffered: Vec::new(),
+             buffered_bytes: 0,
+         }
++    }
++    #[test]
++    #[cfg(unix)]
++    fn occupied_writer_creates_one_pinned_durable_branch() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-writer-state-{}", uuid::Uuid::new_v4()));
++        let store = Store::open(directory.clone()).unwrap();
++        let mut run = fake_run();
++        run.task.status = "completed".into();
++        run.task.artifacts.push(crate::model::Artifact {
++            id: "old".into(),
++            name: "old.md".into(),
++            kind: "markdown".into(),
++            content: "edited first".into(),
++            created_at: 0,
++        });
++        let (task, anchor) = run
++            .task
++            .continued(
++                run.task.revision,
++                &run.task.run_id,
++                &run.task.turn_id,
++                "more information",
++            )
++            .unwrap();
++        run.task = task;
++        run.resume_turn = Some(anchor);
++        run.startup = Startup::Connecting;
++        store.save_task(run.task.clone()).unwrap();
++        run.thread_request(std::path::Path::new("/tmp"), "default");
++        assert!(run
++            .recover_writer(3, "thread thread already has an active writer")
++            .is_none());
++        assert!(run
++            .recover_writer(2, "thread other already has an active writer")
++            .is_none());
++        let read = run
++            .recover_writer(2, "thread thread already has an active writer")
++            .unwrap();
++        assert_eq!(read["method"], "thread/read");
++        assert!(run
++            .recover_writer(2, "thread thread already has an active writer")
++            .is_none());
++        let source = json!({"thread":{"id":"thread","status":{"type":"notLoaded"},"turns":[{"id":"turn","status":"completed","items":[]}]}});
++        for bad in [
++            json!({"thread":{"id":"foreign","status":{"type":"notLoaded"},"turns":[{"id":"turn","status":"completed"}]}}),
++            json!({"thread":{"id":"thread","status":{"type":"active"},"turns":[{"id":"turn","status":"completed"}]}}),
++            json!({"thread":{"id":"thread","status":{"type":"notLoaded"},"turns":[{"id":"changed","status":"completed"}]}}),
++            json!({"thread":{"id":"thread","status":{"type":"notLoaded"},"turns":[{"id":"turn","status":"inProgress"}]}}),
++        ] {
++            assert!(run.request_fork(&bad).is_err());
++        }
++        let fork = run.request_fork(&source).unwrap();
++        assert_eq!(fork["method"], "thread/fork");
++        assert_eq!(fork["params"]["lastTurnId"], "turn");
++        assert_eq!(fork["params"]["deferGoalContinuation"], true);
++        assert_eq!(fork["params"]["sandbox"], "read-only");
++        assert!(run.request_fork(&source).is_err());
++        let branch = json!({"model":"default","thread":{"id":"branch","forkedFromId":"thread","status":{"type":"idle"},"turns":[{"id":"turn","status":"completed","items":[]}]}});
++        for field in ["id", "forkedFromId"] {
++            let mut bad = branch.clone();
++            bad["thread"][field] = json!("thread");
++            if field == "forkedFromId" {
++                bad["thread"][field] = json!("foreign");
++            }
++            assert!(run.start_forked_turn(&bad, &store).is_err());
++        }
++        let mut bad = branch.clone();
++        bad["thread"]["status"]["type"] = json!("notLoaded");
++        assert!(run.start_forked_turn(&bad, &store).is_err());
++        let mut bad = branch.clone();
++        bad["thread"]["turns"][0]["items"] = json!([{"text":"changed"}]);
++        assert!(run.start_forked_turn(&bad, &store).is_err());
++        let empty = Store::open(directory.join("empty")).unwrap();
++        assert!(run.start_forked_turn(&branch, &empty).is_err());
++        std::fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(run.start_forked_turn(&branch, &store).is_err());
++        assert_eq!(run.task.thread_id.as_deref(), Some("thread"));
++        assert_eq!(
++            store.task(&run.task.id).unwrap().thread_id.as_deref(),
++            Some("thread")
++        );
++        std::fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        let request = run.start_forked_turn(&branch, &store).unwrap();
++        assert_eq!(request["method"], "turn/start");
++        assert_eq!(request["params"]["threadId"], "branch");
++        let saved = Store::open(directory.clone())
++            .unwrap()
++            .task(&run.task.id)
++            .unwrap();
++        assert_eq!(saved.thread_id.as_deref(), Some("branch"));
++        assert_eq!(
++            saved
++                .supplements
++                .last()
++                .unwrap()
++                .source_thread_id
++                .as_deref(),
++            Some("thread")
++        );
++        assert_eq!(saved.artifacts[0].content, "edited first");
++        assert!(run.start_forked_turn(&branch, &store).is_err());
++        run.task.status = "completed".into();
++        run.task.turn_id = Some("second-turn".into());
++        let (next, anchor) = run
++            .task
++            .continued(
++                run.task.revision,
++                &run.task.run_id,
++                &run.task.turn_id,
++                "second branch",
++            )
++            .unwrap();
++        run.task = next;
++        run.resume_turn = Some(anchor);
++        run.startup = Startup::Connecting;
++        store.save_task(run.task.clone()).unwrap();
++        run.thread_request(std::path::Path::new("/tmp"), "default");
++        run.recover_writer(2, "thread branch already has an active writer")
++            .unwrap();
++        run.request_fork(&json!({"thread":{"id":"branch","status":{"type":"notLoaded"},"turns":[{"id":"second-turn","status":"completed","items":[]}]}})).unwrap();
++        run.start_forked_turn(&json!({"model":"default","thread":{"id":"branch-two","forkedFromId":"branch","status":{"type":"idle"},"turns":[{"id":"second-turn","status":"completed","items":[]}]}}), &store).unwrap();
++        let saved = Store::open(directory.clone())
++            .unwrap()
++            .task(&run.task.id)
++            .unwrap();
++        assert_eq!(saved.thread_id.as_deref(), Some("branch-two"));
++        assert_eq!(
++            saved.supplements[0].source_thread_id.as_deref(),
++            Some("thread")
++        );
++        assert_eq!(
++            saved.supplements[1].source_thread_id.as_deref(),
++            Some("branch")
++        );
++        std::fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+     #[cfg(unix)]
+@@ -1206,7 +1486,7 @@
+         .map_err(|_| "执行器连接已关闭".to_string())
+ }
+ fn initialize() -> Value {
+-    json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"orbit-workbench","title":"Orbit","version":"0.1.0"},"capabilities":{"experimentalApi":false}}})
++    json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"orbit-workbench","title":"Orbit","version":"0.1.0"},"capabilities":{"experimentalApi":true}}})
+ }
+ 
+ fn read_agent_history(
+@@ -1648,6 +1928,8 @@
+             controls: HashMap::new(),
+             next_id: 100,
+             model_cursors: Vec::new(),
++            requested_model: None,
++            fork_anchor: None,
+             closed: false,
+             last_emit: Instant::now(),
+             resume_turn,
+@@ -1836,6 +2118,17 @@
+             }
+         } else if message.get("id").is_some() {
+             let id = message["id"].as_u64().unwrap_or(0);
++            let expected = match id {
++                1 | 4 => r.startup == Startup::Connecting && r.requested_model.is_none(),
++                2 => r.startup == Startup::Connecting && r.requested_model.is_some(),
++                5 => r.startup == Startup::ReadingSource,
++                6 => r.startup == Startup::Forking,
++                3 => r.startup == Startup::AwaitingTurn,
++                _ => true,
++            };
++            if !expected {
++                return true;
++            }
+             if message.get("error").is_some() {
+                 if r.reject_control(id) {
+                     let snapshot = r.task.clone();
+@@ -1844,6 +2137,17 @@
+                     return true;
+                 }
+                 let detail = error_message(&message["error"]);
++                if let Some(request) = r.recover_writer(id, &detail) {
++                    if send(&mut r.input, &request).is_err() {
++                        drop(r);
++                        self.fail(app, run, "无法核对占用会话，未发送补充", "failed");
++                        return false;
++                    }
++                    let snapshot = r.task.clone();
++                    drop(r);
++                    self.publish(app, snapshot);
++                    return true;
++                }
+                 let label = "初始化或启动";
+                 drop(r);
+                 self.fail(
+@@ -1855,7 +2159,7 @@
+                 return false;
+             }
+             let request = match id {
+-                1 => {
++                1 if r.startup == Startup::Connecting && r.requested_model.is_none() => {
+                     if send(&mut r.input, &json!({"method":"initialized"})).is_err() {
+                         drop(r);
+                         self.fail(app, run, "初始化通知发送失败", "failed");
+@@ -1863,48 +2167,77 @@
+                     }
+                     Some(json!({"id":4,"method":"model/list","params":{"limit":100}}))
+                 }
+-                4 => match select_model(&message["result"], &mut r.model_cursors) {
+-                    Ok(ModelChoice::Selected(model)) => {
+-                        r.task.event(
+-                            &format!("本次请求 CLI 目录默认模型：{}", model),
+-                            "system",
+-                            "工作台",
+-                        );
+-                        changed = true;
+-                        Some(r.thread_request(directory, &model))
++                4 if r.startup == Startup::Connecting && r.requested_model.is_none() => {
++                    match select_model(&message["result"], &mut r.model_cursors) {
++                        Ok(ModelChoice::Selected(model)) => {
++                            r.task.event(
++                                &format!("本次请求 CLI 目录默认模型：{}", model),
++                                "system",
++                                "工作台",
++                            );
++                            changed = true;
++                            Some(r.thread_request(directory, &model))
++                        }
++                        Ok(ModelChoice::NextPage(cursor)) => Some(
++                            json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}}),
++                        ),
++                        Err(error) => {
++                            drop(r);
++                            self.fail(app, run, &error, "failed");
++                            return false;
++                        }
+                     }
+-                    Ok(ModelChoice::NextPage(cursor)) => Some(
+-                        json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}}),
+-                    ),
+-                    Err(error) => {
+-                        drop(r);
+-                        self.fail(app, run, &error, "failed");
+-                        return false;
++                }
++                2 if r.startup == Startup::Connecting && r.requested_model.is_some() => {
++                    match r.start_turn(&message["result"]) {
++                        Ok(request) => {
++                            changed = true;
++                            Some(request)
++                        }
++                        Err(error) => {
++                            drop(r);
++                            self.fail(app, run, &error, "failed");
++                            return false;
++                        }
+                     }
+-                },
+-                2 => match r.start_turn(&message["result"]) {
+-                    Ok(request) => {
+-                        changed = true;
+-                        Some(request)
++                }
++                5 if r.startup == Startup::ReadingSource => {
++                    match r.request_fork(&message["result"]) {
++                        Ok(request) => Some(request),
++                        Err(error) => {
++                            drop(r);
++                            self.fail(app, run, &error, "failed");
++                            return false;
++                        }
+                     }
+-                    Err(error) => {
+-                        drop(r);
+-                        self.fail(app, run, &error, "failed");
+-                        return false;
++                }
++                6 if r.startup == Startup::Forking => {
++                    match r.start_forked_turn(&message["result"], &self.store) {
++                        Ok(request) => {
++                            changed = true;
++                            Some(request)
++                        }
++                        Err(error) => {
++                            drop(r);
++                            self.fail(app, run, &error, "failed");
++                            return false;
++                        }
+                     }
+-                },
+-                3 => match r.accept_turn(&message["result"]) {
+-                    Ok(buffered) => {
+-                        changed = true;
+-                        replay = buffered;
+-                        None
++                }
++                3 if r.startup == Startup::AwaitingTurn => {
++                    match r.accept_turn(&message["result"]) {
++                        Ok(buffered) => {
++                            changed = true;
++                            replay = buffered;
++                            None
++                        }
++                        Err(error) => {
++                            drop(r);
++                            self.fail(app, run, &error, "unknown");
++                            return false;
++                        }
+                     }
+-                    Err(error) => {
+-                        drop(r);
+-                        self.fail(app, run, &error, "unknown");
+-                        return false;
+-                    }
+-                },
++                }
+                 _ => {
+                     changed = r.confirm_control(id, &message["result"]);
+                     None
+--- src-tauri/src/model.rs.before
++++ src-tauri/src/model.rs
+@@ -87,6 +87,8 @@
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct Supplement {
++    #[serde(default)]
++    pub source_thread_id: Option<String>,
+     pub run_id: String,
+     pub previous_turn_id: String,
+     pub text: String,
+@@ -207,6 +209,7 @@
+         let mut next = self.clone();
+         next.begin_run(true);
+         next.supplements.push(Supplement {
++            source_thread_id: None,
+             run_id: next.run_id.clone().unwrap(),
+             previous_turn_id: anchor.clone(),
+             text: text.trim().into(),
+--- src-tauri/Cargo.toml.before
++++ src-tauri/Cargo.toml
+@@ -13,7 +13,7 @@
+ 
+ [features]
+ default = ["desktop"]
+-desktop = ["dep:tauri", "dep:tauri-build"]
++desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
+ 
+ [dependencies]
+ tauri = { version = "2", features = [], optional = true }
+@@ -21,3 +21,5 @@
+ serde_json = "1"
+ uuid = { version = "1", features = ["v4"] }
+ libc = "0.2"
++
++tauri-plugin-dialog = { version = "2", optional = true }
+--- src-tauri/Cargo.lock.before
++++ src-tauri/Cargo.lock
+@@ -2007,6 +2007,7 @@
+ dependencies = [
+  "bitflags 2.13.2",
+  "block2",
++ "libc",
+  "objc2",
+  "objc2-core-foundation",
+ ]
+@@ -2100,6 +2101,7 @@
+  "serde_json",
+  "tauri",
+  "tauri-build",
++ "tauri-plugin-dialog",
+  "uuid",
+ ]
+ 
+@@ -2495,6 +2497,30 @@
+  "wasm-bindgen-futures",
+  "wasm-streams",
+  "web-sys",
++]
++
++[[package]]
++name = "rfd"
++version = "0.16.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
++dependencies = [
++ "block2",
++ "dispatch2",
++ "glib-sys",
++ "gobject-sys",
++ "gtk-sys",
++ "js-sys",
++ "log",
++ "objc2",
++ "objc2-app-kit",
++ "objc2-core-foundation",
++ "objc2-foundation",
++ "raw-window-handle",
++ "wasm-bindgen",
++ "wasm-bindgen-futures",
++ "web-sys",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -3154,6 +3180,64 @@
+ ]
+ 
+ [[package]]
++name = "tauri-plugin"
++version = "2.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1140cf34a3b3b836a13103dcab17f18831d5cc3534cbd435dc01a5c6daa65aa2"
++dependencies = [
++ "anyhow",
++ "glob",
++ "plist",
++ "schemars 0.8.22",
++ "serde",
++ "serde_json",
++ "tauri-utils",
++ "walkdir",
++]
++
++[[package]]
++name = "tauri-plugin-dialog"
++version = "2.8.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "daf9a5c92e39bdd84f22f6be9230e39d0c4e140345f71ffe6058dca4f71127cf"
++dependencies = [
++ "log",
++ "raw-window-handle",
++ "rfd",
++ "serde",
++ "serde_json",
++ "tauri",
++ "tauri-plugin",
++ "tauri-plugin-fs",
++ "thiserror 2.0.21",
++ "url",
++]
++
++[[package]]
++name = "tauri-plugin-fs"
++version = "2.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "466eb32466fe5021b6728b06862f9ff14a9f7e1af890047654e03a96d7c0e1bb"
++dependencies = [
++ "anyhow",
++ "dunce",
++ "glob",
++ "log",
++ "objc2-foundation",
++ "percent-encoding",
++ "schemars 0.8.22",
++ "serde",
++ "serde_json",
++ "serde_repr",
++ "tauri",
++ "tauri-plugin",
++ "tauri-utils",
++ "thiserror 2.0.21",
++ "toml 1.1.6+spec-1.1.0",
++ "url",
++]
++
++[[package]]
+ name = "tauri-runtime"
+ version = "2.12.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4043,6 +4127,15 @@
+ 
+ [[package]]
+ name = "windows-sys"
++version = "0.60.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
++dependencies = [
++ "windows-targets 0.53.5",
++]
++
++[[package]]
++name = "windows-sys"
+ version = "0.61.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+@@ -4074,7 +4167,7 @@
+  "windows_aarch64_gnullvm 0.52.6",
+  "windows_aarch64_msvc 0.52.6",
+  "windows_i686_gnu 0.52.6",
+- "windows_i686_gnullvm",
++ "windows_i686_gnullvm 0.52.6",
+  "windows_i686_msvc 0.52.6",
+  "windows_x86_64_gnu 0.52.6",
+  "windows_x86_64_gnullvm 0.52.6",
+@@ -4082,6 +4175,23 @@
+ ]
+ 
+ [[package]]
++name = "windows-targets"
++version = "0.53.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3"
++dependencies = [
++ "windows-link",
++ "windows_aarch64_gnullvm 0.53.1",
++ "windows_aarch64_msvc 0.53.1",
++ "windows_i686_gnu 0.53.1",
++ "windows_i686_gnullvm 0.53.1",
++ "windows_i686_msvc 0.53.1",
++ "windows_x86_64_gnu 0.53.1",
++ "windows_x86_64_gnullvm 0.53.1",
++ "windows_x86_64_msvc 0.53.1",
++]
++
++[[package]]
+ name = "windows-threading"
+ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4112,6 +4222,12 @@
+ checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+ 
+ [[package]]
++name = "windows_aarch64_gnullvm"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
++
++[[package]]
+ name = "windows_aarch64_msvc"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4124,6 +4240,12 @@
+ checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+ 
+ [[package]]
++name = "windows_aarch64_msvc"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
++
++[[package]]
+ name = "windows_i686_gnu"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4136,12 +4258,24 @@
+ checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
+ 
+ [[package]]
++name = "windows_i686_gnu"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "960e6da069d81e09becb0ca57a65220ddff016ff2d6af6a223cf372a506593a3"
++
++[[package]]
+ name = "windows_i686_gnullvm"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+ 
+ [[package]]
++name = "windows_i686_gnullvm"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
++
++[[package]]
+ name = "windows_i686_msvc"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4154,6 +4288,12 @@
+ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+ 
+ [[package]]
++name = "windows_i686_msvc"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
++
++[[package]]
+ name = "windows_x86_64_gnu"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4166,6 +4306,12 @@
+ checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+ 
+ [[package]]
++name = "windows_x86_64_gnu"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
++
++[[package]]
+ name = "windows_x86_64_gnullvm"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4178,6 +4324,12 @@
+ checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+ 
+ [[package]]
++name = "windows_x86_64_gnullvm"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
++
++[[package]]
+ name = "windows_x86_64_msvc"
+ version = "0.42.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4188,6 +4340,12 @@
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
++
++[[package]]
++name = "windows_x86_64_msvc"
++version = "0.53.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+ 
+ [[package]]
+ name = "winnow"
+--- README.md.before
++++ README.md
+@@ -57,7 +57,7 @@
+ 
+ 浏览器仅预览空界面，不读取或写入旧 localStorage 演示数据，也不能创建或执行任务。桌面 App 中，交付物点击即打开 Markdown 预览，支持标题、列表、表格、代码块；切换“编辑”可修改源码，点击“保存”或 ⌘ / Ctrl S 写入本地记录。文档窗口关闭前会提示未保存修改；直接退出整个 App 时请先保存。只允许编辑已结束任务的交付物，单文档上限 256 KB（UTF-8 字节），旧内容冲突或写盘失败会保留草稿并提示。
+ 
+-下载使用已保存版本，导出到 AppData/exports。文档中的原始 HTML 不执行，图片显示占位文字，仅允许 HTTP/HTTPS 和页内链接。没有任意文件路径写入接口。
++下载使用已保存版本。设置 → 导出文件夹可选择本机文件夹，单份交付和归档导出共用此位置，重启后保留；可恢复到默认 AppData/exports。文件夹失效时提示重新选择，不自动改存到其他位置。文档中的原始 HTML 不执行，图片显示占位文字，仅允许 HTTP/HTTPS 和页内链接。没有任意文件路径写入接口。
+ 
+ ## 检查
+ 
+@@ -98,3 +98,7 @@
+ 每个任务最多保存 10 份交付、10 次交付后补充，每次 2000 字。已接受但初始化失败的补充也保留并计入次数。未知状态不自动续接；外部会话若出现了较新轮次或仍在运行，也停止启动，避免误用上下文。补充历史表示已提交给工作台，不代表模型已经成功处理。
+ 
+ 运行中补充会保存原文，并显示待确认、执行器已确认、已拒绝或确认未知。确认响应必须匹配发送时的 run / turn；执行器确认仅表示收到该轮输入，是否采用应在交付中核对。确认未知不自动重发。同一轮的多个最终回答会按 item ID 合并为交付，而非只保留最后一段；输出最多 64k 字符，超限带明确提示。运行中补充最多 20 条。
++
++补充启动失败时，任务对话会显示具体报错；未启动新 turn 的失败补充可点击“使用上次补充内容”重新填入草稿，核对后手动发送。现有交付版本始终保留。
++
++若原会话被其他执行器占用，工作台只在核对最后已完成轮次后复制历史到续接分支，聊天中明确标注；不抢占原会话。分支记录必须保存成功后才发送补充。

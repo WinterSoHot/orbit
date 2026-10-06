@@ -1,0 +1,2564 @@
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,27 @@
++{
++  "name": "orbit-agent-workbench",
++  "private": true,
++  "version": "0.1.0",
++  "type": "module",
++  "scripts": {
++    "dev": "vite --host 127.0.0.1",
++    "build": "tsc --noEmit && vite build",
++    "preview": "vite preview --host 127.0.0.1",
++    "test": "node --experimental-strip-types --test src/model.test.ts",
++    "tauri": "tauri"
++  },
++  "dependencies": {
++    "@tauri-apps/api": "^2.0.0",
++    "lucide-react": "^0.468.0",
++    "react": "^19.0.0",
++    "react-dom": "^19.0.0"
++  },
++  "devDependencies": {
++    "@tauri-apps/cli": "^2.0.0",
++    "@types/react": "^19.0.0",
++    "@types/react-dom": "^19.0.0",
++    "@vitejs/plugin-react": "^5.0.0",
++    "typescript": "~5.9.0",
++    "vite": "^7.0.0"
++  }
++}
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1 @@
++{"compilerOptions":{"target":"ES2022","lib":["ES2022","DOM","DOM.Iterable"],"module":"ESNext","moduleResolution":"bundler","allowImportingTsExtensions":true,"resolveJsonModule":true,"isolatedModules":true,"noEmit":true,"jsx":"react-jsx","strict":true,"skipLibCheck":true,"noUnusedLocals":true,"noUnusedParameters":true},"include":["src"],"exclude":["src/*.test.ts"]}
+--- /dev/null
++++ b/vite.config.ts
+@@ -0,0 +1,4 @@
++import { defineConfig } from 'vite';
++import react from '@vitejs/plugin-react';
++
++export default defineConfig({ plugins: [react()], server: { port: 1420, strictPort: true }, clearScreen: false });
+--- /dev/null
++++ b/index.html
+@@ -0,0 +1,2 @@
++<!doctype html>
++<html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="theme-color" content="#f6f7f9"/><title>Orbit · Agent 工作台</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++node_modules/
++dist/
++src-tauri/target/
++.DS_Store
++*.log
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,72 @@
++# Orbit · 个人 Agent 工作台
++
++Tauri 2 + React + TypeScript + Rust 的本地桌面原型。支持调研、编程、写作任务；任务列表、动态 Agent 关系图、待介入、运行记录与纯文本交付。
++
++## 运行
++
++已构建的 macOS 应用位于 `src-tauri/target/debug/bundle/macos/Orbit.app`（已生成本机调试版本）。本机测试环境：macOS 13.7.8 Intel、Node 24.21.0、Rust 1.98.0、Codex 0.150.1。
++
++```sh
++npm install --registry=https://registry.npmjs.org
++npm run tauri dev
++```
++
++仅预览界面：
++
++```sh
++npm run dev
++# 打开 http://127.0.0.1:1420/
++```
++
++本地应用构建：
++
++```sh
++npm run tauri build -- --debug --bundles app
++```
++
++这是未做开发者签名和公证的本地原型，未验证其他机器或操作系统的分发。
++
++打包后的无窗口连接检查（不调用模型）：
++
++```sh
++env PATH=/usr/bin:/bin:/usr/sbin:/sbin src-tauri/target/debug/bundle/macos/Orbit.app/Contents/MacOS/orbit-agent-workbench --doctor
++```
++
++## 体验
++
++- 首次打开有三个示例任务。第一项自动演示探索 → 分析 → 范围确认 → 复核 → 交付。数据明确标注“演示”。
++- 创建任务，选择调研、编程或写作；点击启动。审批、补充方向、中断、结果预览与导出可交互。
++- 真正执行需要 Tauri 桌面 App 和已安装、已认证的 Codex CLI。在设置中检查连接，然后创建“本机 Codex”任务并显式点击启动。
++- 连接检查仅发 initialize，不发 thread/start 或 turn/start，不调用模型。真实任务会消耗 CLI 对应的模型额度。
++- 真实模式同一时间只运行一个根任务。CLI 路径优先检查 `~/.local/bin/codex`、`~/.cargo/bin/codex`、Homebrew 安装路径，再使用 PATH。
++
++## 权限与运行语义
++
++- 文件沙箱固定 `read-only`；拒绝权限提升和文件修改审批。MCP 工具配置来自本机 CLI，文件沙箱不等同于对远程服务副作用的隔离。
++- 真实状态由 Rust 持有，前端仅消费投影。重复或过期信息请求不会重新发送；不自动重试副作用。
++- “中断请求中”只有在执行器确认后变成“已中断”。确认超时或连接结束显示“需核对”；不承诺外部操作已撤销。
++- 子 Agent 仅展示已观测关系。实际 spawn/parentThreadId 可建立父子关系，sendMessage 不创建父子关系。缺失事件不会补造状态或进度百分比。
++- 退出 App 强制尝试停止它拥有的进程组；主动脱离该组的进程不在此范围。清理未确认时记录事件并阻止新真实任务。重启保留历史，把在途运行标为需核对，使旧请求失效，不自动续跑。
++- 执行结束与业务验收分开；Codex 输出是对话交付，演示结果不是实际检索或仓库变更。
++
++## 本地记录
++
++Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。任务历史最多保留 50 项，活动最多 100 条，Agent 最多 64 个，单条协议消息最多 1 MiB。
++
++浏览器预览使用本地 localStorage，只提供演示。交付以纯文本展示；浏览器下载文件，桌面导出到自己的 AppData/exports，不提供任意路径写入或 HTML 执行接口。
++
++## 检查
++
++```sh
++npm test
++npm run build
++MACOSX_DEPLOYMENT_TARGET=13.0 cargo test --manifest-path src-tauri/Cargo.toml --lib
++```
++
++较快的协议核心检查不需桌面依赖：
++
++```sh
++MACOSX_DEPLOYMENT_TARGET=13.0 cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features
++```
++
++完整真实任务、模型用量、子代理事件覆盖和取消外部命令的效果尚需真实运行验证。此原型默认不发起任何模型请求，不包含商业登录集成。
+--- /dev/null
++++ b/src-tauri/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "orbit-agent-workbench"
++version = "0.1.0"
++description = "Personal agent workbench"
++edition = "2021"
++
++[lib]
++name = "orbit_workbench_lib"
++crate-type = ["staticlib", "cdylib", "rlib"]
++
++[build-dependencies]
++tauri-build = { version = "2", features = [], optional = true }
++
++[features]
++default = ["desktop"]
++desktop = ["dep:tauri", "dep:tauri-build"]
++
++[dependencies]
++tauri = { version = "2", features = [], optional = true }
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
++uuid = { version = "1", features = ["v4"] }
++libc = "0.2"
+--- /dev/null
++++ b/src-tauri/build.rs
+@@ -0,0 +1,4 @@
++fn main() {
++    #[cfg(feature = "desktop")]
++    tauri_build::build()
++}
+--- /dev/null
++++ b/src-tauri/tauri.conf.json
+@@ -0,0 +1,43 @@
++{
++  "$schema": "https://schema.tauri.app/config/2",
++  "productName": "Orbit",
++  "version": "0.1.0",
++  "identifier": "local.orbit.agent-workbench",
++  "build": {
++    "beforeDevCommand": "npm run dev",
++    "devUrl": "http://127.0.0.1:1420",
++    "beforeBuildCommand": "npm run build",
++    "frontendDist": "../dist"
++  },
++  "app": {
++    "windows": [
++      {
++        "label": "main",
++        "title": "Orbit · Agent 工作台",
++        "width": 1480,
++        "height": 960,
++        "minWidth": 1060,
++        "minHeight": 720,
++        "backgroundColor": "#F6F7F9"
++      }
++    ],
++    "security": {
++      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'"
++    }
++  },
++  "bundle": {
++    "active": true,
++    "targets": [
++      "app"
++    ],
++    "icon": [
++      "icons/icon.icns",
++      "icons/icon.png"
++    ],
++    "category": "Productivity",
++    "shortDescription": "个人 Agent 工作台",
++    "macOS": {
++      "minimumSystemVersion": "13.0"
++    }
++  }
++}
+--- /dev/null
++++ b/src-tauri/capabilities/default.json
+@@ -0,0 +1 @@
++{"identifier":"main","description":"Only the local workbench window can receive runtime events.","windows":["main"],"permissions":["core:event:default"]}
+--- /dev/null
++++ b/src/App.tsx
+@@ -0,0 +1,122 @@
++import { useEffect, useRef, useState } from 'react';
++import { Activity, ArrowDownToLine, ArrowRight, ArrowUpRight, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
++import { applyRuntime, isActive, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
++import type { Approval, Artifact, Provider, Scene, Status, Task } from './model';
++import { cancelReal, checkCli, createReal, desktop, exportArtifact, loadTasks, replyReal, saveDemo, startReal, steerReal, watchRuntime } from './bridge';
++import type { Doctor } from './bridge';
++import { Graph } from './Graph';
++
++type View='tasks'|'attention'|'artifacts'|'settings';
++const time=(n:number)=>new Date(n).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
++const duration=(task:Task,now:number)=>{if(!task.startedAt)return '尚未启动';const seconds=Math.max(0,Math.round(((task.finishedAt||now)-task.startedAt)/1000));return seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;};
++const errorText=(error:unknown)=>error instanceof Error?error.message:String(error);
++
++function Badge({status}:{status:Status}) {return <span className={`status-badge ${status}`}><span className={`status-dot ${status}`}/>{statusLabels[status]}</span>;}
++
++export default function App() {
++  const [tasks,setTasks]=useState<Task[]>([]),[loaded,setLoaded]=useState(false),[view,setView]=useState<View>('tasks');
++  const [selectedId,setSelectedId]=useState<string|null>(null),[nodeId,setNodeId]=useState<string|null>('lead');
++  const [scene,setScene]=useState<Scene|'all'>('all'),[query,setQuery]=useState(''),[taskFilter,setTaskFilter]=useState<'all'|'active'|'completed'>('all');
++  const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState('');
++  const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
++  const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),lastDemo=useRef('');
++  const task=tasks.find(t=>t.id===selectedId)||tasks[0];
++  const node=task?.nodes.find(n=>n.id===nodeId)||task?.nodes[0];
++  const attention=tasks.flatMap(t=>t.approvals.map(a=>({task:t,approval:a})));
++  const deliveries=tasks.flatMap(t=>t.artifacts.map(a=>({task:t,artifact:a})));
++  const active=tasks.filter(t=>isActive(t.status)).length;
++
++  useEffect(()=>{
++    mounted.current=true;let unlisten:(()=>void)|undefined;
++    (async()=>{
++      const release=await watchRuntime(incoming=>{if(mounted.current)setTasks(current=>{const found=current.find(t=>t.id===incoming.id);return found?current.map(t=>t.id===incoming.id?applyRuntime(t,incoming):t):[incoming,...current];});},message=>{if(mounted.current){persistence.current=false;setToast(message);}});
++      if(!mounted.current){release();return;}unlisten=release;
++      const result=await loadTasks();if(!mounted.current)return;
++      if(result.error){persistence.current=false;setToast(result.error);}
++      const initial=result.tasks.length?result.tasks:seedTasks();setTasks(initial);setSelectedId(initial[0]?.id||null);setLoaded(true);
++    })().catch(error=>{if(mounted.current){persistence.current=false;setTasks(seedTasks());setLoaded(true);setToast(`记录读取失败：${errorText(error)}`);}});
++    return()=>{mounted.current=false;unlisten?.();};
++  },[]);
++  useEffect(()=>{if(!loaded||!persistence.current)return;const signature=JSON.stringify(tasks.filter(t=>t.provider==='demo'));if(signature===lastDemo.current)return;lastDemo.current=signature;const snapshot=tasks;saveQueue.current=saveQueue.current.then(()=>saveDemo(snapshot)).catch(error=>{persistence.current=false;setToast(`保存失败：${errorText(error)}`);});},[tasks,loaded]);
++  useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>{setNow(Date.now());setTasks(current=>{const next=current.map(t=>t.provider==='demo'?reduceTask(t,{type:'tick'}):t);return next.some((t,i)=>t!==current[i])?next:current;});},3500);return()=>clearInterval(timer);},[loaded]);
++  useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(''),6500);return()=>clearTimeout(timer);},[toast]);
++  useEffect(()=>{const key=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);setArtifact(null);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[]);
++
++  async function perform(work:()=>Promise<unknown>) {setBusy(true);try{await work();}catch(error){setToast(errorText(error));}finally{setBusy(false);}}
++  function select(t:Task){setSelectedId(t.id);setNodeId(t.nodes[0]?.id||null);setSteer('');}
++  function act(action:Parameters<typeof reduceTask>[1],target=task){if(target)setTasks(current=>current.map(t=>t.id===target.id?reduceTask(t,action):t));}
++  async function launch(target:Task){
++    if(target.provider==='demo'){act({type:'start'},target);return;}
++    await perform(async()=>{
++      setTasks(current=>current.map(t=>t.id===target.id?{...t,status:'queued',runId:null,approvals:[]}:t));
++      try {const incoming=await startReal(target);setTasks(current=>{const newer=current.find(t=>t.id===incoming.id&&t.runId===incoming.runId&&t.revision>incoming.revision);return [newer||incoming,...current.filter(t=>t.id!==incoming.id)];});select(incoming);}
++      catch(error){setTasks(current=>current.map(t=>t.id===target.id&&t.runId===null?target:t));throw error;}
++    });
++  }
++  async function sendDirection(){const text=steer.trim();if(!text||!task)return;if(task.provider==='demo')act({type:'steer',text});else await perform(()=>steerReal(task.runId!,text));setSteer('');}
++  async function stop(){if(!task)return;if(task.provider==='demo')act({type:'cancel'});else await perform(()=>cancelReal(task.runId!));}
++  function reply(target:Task,id:string,accept:boolean){if(target.provider==='demo')act({type:accept?'approve':'decline',id},target);}
++  async function answer(target:Task,id:string,answers:Record<string,string>){await perform(()=>replyReal(target.runId!,id,answers));}
++  async function inspectCli(){setChecking(true);try{setDoctor(await checkCli());}catch(error){setToast(errorText(error));}finally{setChecking(false);}}
++  async function create(title:string,prompt:string,newScene:Scene,provider:Provider){await perform(async()=>{const next=provider==='codex'?await createReal(title,prompt,newScene):makeTask(title,prompt,newScene,provider);setTasks(current=>[next,...current].slice(0,50));select(next);setView('tasks');setScene('all');setTaskFilter('all');setQuery('');setModal(false);});}
++  async function download(file:Artifact){if(desktop){await perform(async()=>{await saveQueue.current;const path=await exportArtifact(file.id);setToast(`交付已保存：${path}`);});return;}const url=URL.createObjectURL(new Blob([file.content],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
++  const filtered=tasks.filter(t=>(scene==='all'||t.scene===scene)&&(!query||`${t.title} ${t.prompt}`.toLowerCase().includes(query.toLowerCase()))&&(taskFilter==='all'||(taskFilter==='active'?isActive(t.status):t.status==='completed')));
++
++  return <div className="app-shell">
++    <aside className="sidebar">
++      <div className="brand"><img src="/orbit.svg" alt=""/><span>Orbit<span className="brand-sub">你的 Agent 工作台</span></span></div>
++      <div className="workspace"><span className="workspace-avatar">G</span><span>个人工作空间<small>本地优先</small></span><ChevronDown size={13}/></div>
++      <div className="nav-section">工作空间</div>
++      <nav aria-label="主导航">
++        <button className={view==='tasks'?'nav-item active':'nav-item'} onClick={()=>setView('tasks')}><LayoutDashboard size={17}/>任务工作台<span>{tasks.length}</span></button>
++        <button className={view==='attention'?'nav-item active':'nav-item'} onClick={()=>setView('attention')}><Bell size={17}/>待介入{attention.length>0&&<span className="attention-count">{attention.length}</span>}</button>
++        <button className={view==='artifacts'?'nav-item active':'nav-item'} onClick={()=>setView('artifacts')}><FolderOpen size={17}/>交付物<span>{deliveries.length}</span></button>
++      </nav>
++      <div className="nav-section scenes-label">任务场景</div>
++      <nav aria-label="场景筛选">{(['all','research','coding','writing'] as const).map(s=><button key={s} className={`nav-item scene-item ${scene===s&&view==='tasks'?'selected-scene':''}`} onClick={()=>{setScene(s);setView('tasks');}}><span className={`scene-dot ${s}`}/>{s==='all'?'全部场景':sceneLabels[s]}</button>)}</nav>
++      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>运行在你的电脑</strong><p>任务与记录留在本地<br/>模型请求由执行器发送</p><span className="local-tech">TAURI 2 <span>·</span> RUST</span></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><span className="user-avatar">G</span><div>个人工作台<small>Orbit Preview · 0.1</small></div><CircleHelp size={15}/></div></div>
++    </aside>
++    <main className="main-shell">
++      <header className="topbar"><div className="breadcrumb">工作空间 <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button><span className="user-avatar small">G</span></div></header>
++      <div className="page-content">
++        <div className="page-heading"><div><div className="eyebrow">PERSONAL AGENT WORKSPACE</div><h1>{view==='tasks'?'让任务持续向前。':view==='attention'?'把注意力留给判断。':view==='artifacts'?'每份成果，都有去处。':'连接你的执行器。'}</h1><p>{view==='tasks'?'发起任务，看见协作，在需要时介入。':view==='attention'?'审批与补充信息集中在这里，每一次介入都有上下文。':view==='artifacts'?'执行结束后，检查结果，再决定是否验收。':'先检查本机连接，再显式启动真实任务。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
++        <div className="metrics"><div className="metric"><span className="metric-icon mint"><Zap size={18}/></span><div><small>正在推进</small><strong>{active}<span>个任务</span></strong></div><span className="metric-note">包含演示</span></div><button className="metric metric-button" onClick={()=>setView('attention')}><span className="metric-icon peach"><Bell size={18}/></span><div><small>等待你介入</small><strong>{attention.length}<span>个请求</span></strong></div><ArrowUpRight size={16}/></button><button className="metric metric-button" onClick={()=>setView('artifacts')}><span className="metric-icon lavender"><FileText size={18}/></span><div><small>已生成交付</small><strong>{deliveries.length}<span>份成果</span></strong></div><ArrowUpRight size={16}/></button></div>
++
++        {view==='tasks'&&<div className="workbench">
++          <section className="task-panel"><div className="panel-heading"><h2>任务<span>{filtered.length}</span></h2><button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button></div><div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div><label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>{t.provider==='demo'?'演示':'Codex'}</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>没有匹配的任务</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
++          <div className="task-detail">{task?<>
++            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务 · 无模型调用':'Codex · 只读文件沙箱'}</span><h2>{task.title}</h2></div><div className="detail-actions"><Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
++            <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`RUN ${task.runId.slice(0,8).toUpperCase()}`:'尚无运行'}</span></div>
++            {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
++            <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>{task.provider==='demo'?'演示关系': '已观测关系'}</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
++              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2><MoreHorizontal size={16}/></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><label>当前工作</label><p className="inspector-summary">{node.summary}</p><label>输出摘要</label><p className="inspector-output">{node.output||'收到执行事件后，输出会显示在这里。'}</p><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
++            {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p>{task.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(task,a.id,true)}>按建议继续<ArrowRight size={13}/></button><button className="text-button" disabled={busy} onClick={()=>reply(task,a.id,false)}>拒绝并停止</button></div>}</div></div>)}
++            <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，真实事件或演示事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
++            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>执行结束，结果等待你检查与验收。</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
++          </>:<div className="large-empty"><Bot size={40}/><h2>从一个任务开始</h2><p>调研、编程或写作，都可以从这里推进。</p><button className="primary-button" onClick={()=>setModal(true)}><Plus size={16}/>新建任务</button></div>}</div>
++        </div>}
++
++        {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">{t.provider==='demo'?'演示':'Codex'} · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p>{t.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(t,a.id,true)}>按建议继续<Check size={14}/></button><button className="text-button" onClick={()=>{select(t);setView('tasks');}}>查看上下文<ArrowUpRight size={13}/></button></div>}</div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
++        {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">演示结果会明确标注</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{t.provider==='demo'?'演示交付':'Codex 输出'}</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>成果正在路上</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
++        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器预览仅支持演示；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>一个真实根任务；演示可并行。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
++        <footer className="page-footer"><span><ShieldCheck size={12}/>{persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit Preview <span>·</span> 把注意力留给重要的事</span></footer>
++      </div>
++    </main>
++    {modal&&<NewTask onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
++    {artifact&&<div className="modal-backdrop" onClick={()=>setArtifact(null)}><section className="artifact-modal" role="dialog" aria-modal="true" aria-label="交付预览" onClick={e=>e.stopPropagation()}><div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭预览" onClick={()=>setArtifact(null)}><X size={19}/></button></div><pre>{artifact.content}</pre><div className="modal-footer"><span>纯文本预览 · 不执行文档内容</span><button className="primary-button" onClick={()=>download(artifact)}><ArrowDownToLine size={15}/>下载文件</button></div></section></div>}
++    {toast&&<div className="toast" role="status"><CircleHelp size={16}/><span>{toast}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setToast('')}><X size={14}/></button></div>}
++  </div>;
++}
++
++function NewTask({onClose,onCreate,busy}:{onClose:()=>void;onCreate:(title:string,prompt:string,scene:Scene,provider:Provider)=>void;busy:boolean}) {
++  const [title,setTitle]=useState(''),[prompt,setPrompt]=useState(''),[scene,setScene]=useState<Scene>('research'),[provider,setProvider]=useState<Provider>('demo');
++  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(title.trim()&&prompt.trim())onCreate(title,prompt,scene,provider);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>开始一个新任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><label>任务场景</label><div className="scene-choices">{(['research','coding','writing'] as Scene[]).map(s=><button key={s} type="button" className={scene===s?'selected':''} onClick={()=>setScene(s)}><span className={`scene-dot ${s}`}/>{sceneLabels[s]}{scene===s&&<Check size={13}/>}</button>)}</div><label>执行方式</label><div className="provider-choices"><button type="button" className={provider==='demo'?'selected':''} onClick={()=>setProvider('demo')}><Sparkles size={17}/><span><strong>交互演示</strong><small>模拟协作，不调用模型</small></span>{provider==='demo'&&<Check size={15}/>}</button><button type="button" disabled={!desktop} className={provider==='codex'?'selected':''} onClick={()=>setProvider('codex')}><Terminal size={17}/><span><strong>本机 Codex</strong><small>{desktop?'只读执行，会消耗模型额度':'需要 Tauri 桌面 App'}</small></span>{provider==='codex'&&<Check size={15}/>}</button></div><div className="new-task-note"><ShieldCheck size={14}/>{provider==='demo'?'创建后点击启动，体验协作与审批流程。':'创建后仍需点击启动。默认文件只读，权限提升会被拒绝。'}</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy||!title.trim()||!prompt.trim()}>创建任务<ArrowRight size={15}/></button></div></form></div>;
++}
++
++function RealApprovalForm({approval,busy,onAnswer}:{approval:Approval;busy:boolean;onAnswer:(answers:Record<string,string>)=>void}) {
++  const [answers,setAnswers]=useState<Record<string,string>>({});
++  return <form className="real-approval-form" onSubmit={e=>{e.preventDefault();onAnswer(answers);}}>
++    {approval.questionIds.map((id,i)=><label key={id}>答复 {i+1}<textarea aria-label={`答复 ${i+1}`} placeholder={`填写第 ${i+1} 个问题的答复`} value={answers[id]||''} onChange={e=>setAnswers(current=>({...current,[id]:e.target.value}))} maxLength={2000} rows={2} required/></label>)}
++    <button className="approval-primary" disabled={busy||approval.questionIds.some(id=>!answers[id]?.trim())}>发送答复<Send size={13}/></button>
++  </form>;
++}
+--- /dev/null
++++ b/src/main.tsx
+@@ -0,0 +1,5 @@
++import ReactDOM from 'react-dom/client';
++import App from './App';
++import './styles.css';
++
++ReactDOM.createRoot(document.getElementById('root')!).render(<App/>);
+--- /dev/null
++++ b/src/model.test.ts
+@@ -0,0 +1,43 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { applyRuntime, recoverTasks, reduceTask } from './model.ts';
++import type { Task } from './model.ts';
++
++function fixture(): Task {
++  return { id: 'task-1', title: 'Research', prompt: 'Research', scene: 'research', provider: 'demo', status: 'approval', createdAt: 0, startedAt: 0, finishedAt: null, runId: 'run-1', threadId: null, turnId: 'turn-1', revision: 1, phase: 3, tokens: null,
++    nodes: [{id:'lead',name:'Lead',role:'主 Agent',model:'Demo',status:'approval',summary:'',output:'',parentId:null}], events: [], artifacts: [],
++    approvals: [{id:'approval-1',requestId:'approval-1',runId:'run-1',turnId:'turn-1',title:'Continue?',description:'',kind:'input',questionIds:[]}] };
++}
++
++test('approval is consumed once and resumes the task', () => {
++  const next = reduceTask(fixture(), {type:'approve',id:'approval-1'}, 1);
++  assert.equal(next.status, 'running'); assert.equal(next.approvals.length, 0);
++  assert.deepEqual(reduceTask(next, {type:'approve',id:'approval-1'}, 2), next);
++});
++test('cancel clears approval and terminal tasks cannot advance', () => {
++  const next = reduceTask(fixture(), {type:'cancel'}, 1);
++  assert.equal(next.status, 'interrupted'); assert.equal(next.approvals.length,0);
++  assert.deepEqual(reduceTask(next,{type:'tick'},2),next);
++});
++test('stale approval cannot approve a new attempt', () => {
++  const task = fixture(); task.runId = 'run-2';
++  assert.deepEqual(reduceTask(task,{type:'approve',id:'approval-1'},1),task);
++});
++test('recovery invalidates requests without rerunning tools', () => {
++  const next = recoverTasks([fixture()])[0];
++  assert.equal(next.status,'unknown'); assert.equal(next.approvals.length,0);
++  assert.equal(recoverTasks([{...fixture(),status:'completed',approvals:[]}])[0].status,'completed');
++});
++test('late and stale real snapshots cannot overwrite current run', () => {
++  const task = {...fixture(),provider:'codex' as const};
++  assert.deepEqual(applyRuntime(task,{...task,runId:'old',revision:100,status:'completed'}),task);
++  assert.deepEqual(applyRuntime(task,{...task,revision:0,status:'running'}),task);
++  assert.equal(applyRuntime(task,{...task,revision:2,status:'completed'}).status,'completed');
++});
++test('wrong request ID and terminal regression are rejected', () => {
++  const task=fixture();task.approvals[0].requestId='other';
++  assert.deepEqual(reduceTask(task,{type:'approve',id:'approval-1'},1),task);
++  const done={...fixture(),provider:'codex' as const,status:'completed' as const};
++  assert.deepEqual(applyRuntime(done,{...done,revision:2,status:'running'}),done);
++  assert.equal(applyRuntime(done,{...done,revision:2}).revision,2);
++});
+--- /dev/null
++++ b/src/styles.css
+@@ -0,0 +1,9 @@
++:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#233244;background:#f6f7f9;font-synthesis:none;font-size:13px;font-weight:400;--mint:#227e67;--border:#e6e9ed;--muted:#8b96a5;--nav:#1e2e3e}
++*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}button{cursor:pointer;border:0;background:none;color:inherit}button:disabled{cursor:not-allowed;opacity:.5}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #88cfb4;outline-offset:3px}button,a,input,textarea{-webkit-tap-highlight-color:transparent}p,h1,h2,h3{margin:0}button{transition:background .15s,border-color .15s,box-shadow .15s}svg{flex-shrink:0}input,textarea{color:#273446}input::placeholder,textarea::placeholder{color:#a4adb9}::selection{background:#c3eadb}.app-shell{display:flex;min-height:100vh}.sidebar{width:192px;flex-shrink:0;background:var(--nav);color:#b8c3cf;padding:28px 14px 0;display:flex;flex-direction:column;position:fixed;inset:0 auto 0 0;z-index:5}.brand{display:flex;gap:10px;align-items:center;padding:0 8px 25px;color:#fff;font-size:24px;font-weight:650;letter-spacing:-.8px}.brand img{width:38px;height:38px}.brand-sub{display:block;font-size:10px;letter-spacing:1px;font-weight:400;color:#94a5b6;margin-top:2px}.workspace{display:flex;align-items:center;gap:9px;margin:4px 0 30px;padding:12px 8px;border:1px solid #ffffff0d;border-radius:8px;background:#ffffff04;font-size:11px;color:#e4e9ee}.workspace small{display:block;color:#8293a4;font-size:10px;margin-top:3px}.workspace>svg{margin-left:auto;color:#8293a4}.workspace-avatar{background:#3c514f;color:#c9e4d6;display:grid;place-items:center;border-radius:6px;width:27px;height:27px;font-weight:600}.nav-section{font-size:9px;letter-spacing:1.3px;color:#7c8fa2;padding:0 11px 10px}.nav-item{width:100%;display:flex;align-items:center;gap:11px;text-align:left;padding:12px 11px;border-radius:6px;font-size:12px;margin-bottom:4px;color:#a7b8c8}.nav-item:hover{background:#ffffff07}.nav-item.active{background:#344c4d;color:#bdf0da}.nav-item>span:last-child:not(.scene-dot){margin-left:auto;font-size:10px;color:#9baebe}.nav-item .attention-count{color:#f2c69c!important;background:#654f3e;width:18px;height:18px;text-align:center;line-height:18px;border-radius:5px}.scenes-label{margin-top:29px}.scene-item{padding:10px 13px;font-size:11px}.scene-item.selected-scene{color:#e0ece7}.scene-dot{width:6px;height:6px;border-radius:2px;background:#8995a5;display:inline-block;flex-shrink:0}.scene-dot.research{background:#83bcaa}.scene-dot.coding{background:#999ac9}.scene-dot.writing{background:#c7a483}.scene-dot.all{background:#6c8296}.sidebar-bottom{margin-top:auto;padding-top:30px}.local-card{border:1px solid #ffffff0b;background:#ffffff03;border-radius:8px;margin:0 1px 17px;padding:13px 12px}.local-card strong{font-size:10px;font-weight:500;color:#ced9e0;margin-left:6px}.local-indicator{display:inline-block;width:6px;height:6px;border-radius:50%;background:#7ab69c;box-shadow:0 0 0 3px #7ab69c13}.local-card p{font-size:10px;color:#7f91a3;line-height:1.8;margin:8px 0 13px}.local-tech{font-size:8px;letter-spacing:1.2px;color:#8098a9}.local-tech>span{margin:0 6px}.profile{display:flex;gap:9px;align-items:center;border-top:1px solid #ffffff0b;padding:20px 4px;margin-top:10px;font-size:11px;color:#d8e0e8}.profile small{font-size:9px;display:block;color:#7c91a4;margin-top:4px}.profile>svg{margin-left:auto;color:#7c91a4}.user-avatar{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#ecdccb;color:#715c4c;font-size:11px;font-weight:600}.user-avatar.small{width:27px;height:27px;font-size:10px}.main-shell{margin-left:192px;width:calc(100% - 192px);min-width:0}.topbar{height:64px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid var(--border);padding:0 30px}.breadcrumb{color:#8b96a5;font-size:11px;display:flex;align-items:center;gap:12px}.breadcrumb span{color:#c8ced5}.breadcrumb strong{font-weight:500;color:#596575}.topbar-right{display:flex;align-items:center;gap:18px}.local-status{display:flex;align-items:center;gap:8px;font-size:10px;color:#7e8998}.topbar-divider{height:16px;width:1px;background:#e9edf0}.icon-button{display:inline-flex;align-items:center;justify-content:center;padding:5px;color:#8d98a7;border-radius:5px;position:relative}.icon-button:hover{background:#f0f3f5;color:#526172}.icon-button i{position:absolute;width:5px;height:5px;background:#dc9d64;border-radius:50%;top:3px;right:4px}.page-content{padding:27px 28px 16px;max-width:1800px;margin:auto}.page-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:25px;gap:15px}.eyebrow{font-size:8px;letter-spacing:2px;color:#91a09e;margin-bottom:8px;font-weight:600}h1{font-size:26px;letter-spacing:-1px;font-weight:630;color:#283746}.page-heading p{font-size:11px;color:#8d98a5;margin-top:9px;letter-spacing:.3px}.primary-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#2b7e68;color:#fff;border:1px solid #2b7e68;border-radius:7px;padding:11px 15px;font-size:11px;font-weight:500;box-shadow:0 2px 3px #1e604b0c;white-space:nowrap}.primary-button:hover{background:#21644f}.primary-button>span{font-size:9px;color:#b6d7ca;margin-left:12px;padding-left:12px;border-left:1px solid #ffffff26}.secondary-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid #e1e6eb;border-radius:6px;background:#fff;padding:9px 12px;font-size:11px;color:#647383;white-space:nowrap}.secondary-button:hover{border-color:#b9c9c1;background:#fafcfb}.secondary-button.compact{padding:7px 10px;font-size:10px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-bottom:24px}.metric{display:flex;align-items:center;gap:13px;border:1px solid var(--border);border-radius:9px;background:#fff;min-height:89px;padding:17px 19px;box-shadow:0 1px 2px #24354702;text-align:left}.metric small{font-size:10px;color:#8b96a4}.metric strong{display:block;font-size:25px;line-height:1.4;font-weight:600;color:#314051}.metric strong>span{font-size:10px;font-weight:400;color:#98a2ae;margin-left:8px}.metric-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;flex-shrink:0}.mint{background:#eaf5f0;color:#538e79}.peach{background:#fcf1e8;color:#c08e63}.lavender{background:#f0eef9;color:#9188ae}.metric-note{font-size:9px;color:#a5aeb9;margin-left:auto;align-self:flex-end;padding-bottom:5px}.metric-button>svg{margin-left:auto;color:#a3adb9}.metric-button:hover{border-color:#cbdcd3}.workbench{display:grid;grid-template-columns:246px minmax(0,1fr);gap:18px;align-items:start}.task-panel{background:#fff;border:1px solid var(--border);border-radius:9px;overflow:hidden}.panel-heading{display:flex;align-items:center;justify-content:space-between;padding:17px 18px;border-bottom:1px solid #edf0f3;gap:8px;min-height:52px}.panel-heading h2{font-size:11px;font-weight:600;display:flex;align-items:center;gap:7px}.panel-heading h2>svg{color:#8293a0}.panel-heading h2>span{font-size:9px;font-weight:400;background:#f1f3f6;color:#95a0ad;border-radius:4px;padding:2px 5px;margin-left:3px}.task-tabs{display:flex;border-bottom:1px solid #edf0f3;gap:20px;padding:0 17px;height:42px}.task-tabs button{font-size:10px;color:#99a2ad;border-bottom:2px solid transparent;padding:0 2px}.task-tabs button.active{color:#35795f;border-bottom-color:#4c9378}.search{display:flex;align-items:center;gap:7px;border:1px solid #ecf0f3;border-radius:6px;margin:14px 13px 4px;padding:8px;background:#fbfcfd;color:#a2abb7}.search input{width:100%;min-width:0;border:0;outline:0;background:none;font-size:10px}.search>span{font-size:8px;color:#b4bdc6;white-space:nowrap}.task-list{padding:9px 9px 12px;min-height:421px;max-height:740px;overflow-y:auto}.task-card{display:block;width:100%;padding:14px 13px;border:1px solid transparent;border-radius:7px;text-align:left;margin-bottom:5px;background:#fff}.task-card:hover{background:#f8faf9}.task-card.selected{background:#f0f7f3;border-color:#d1e5d9;box-shadow:inset 3px 0 #79a78e}.task-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}.scene-chip{display:inline-flex;border-radius:4px;padding:3px 6px;font-size:8px;color:#7a8998;background:#f1f4f7;line-height:1.3}.scene-chip.research{color:#5d917d;background:#e8f3ed}.scene-chip.coding{color:#8d85aa;background:#efedf7}.scene-chip.writing{color:#b39171;background:#f8efe6}.provider-label{font-size:8px;color:#a8b0ba;letter-spacing:.1px}.provider-label.codex{color:#51917c;background:#eff8f3;padding:4px 7px;border-radius:4px}.task-card h3{font-size:11px;font-weight:550;color:#435365;line-height:1.65;margin-bottom:5px}.task-card p{font-size:9px;color:#9ba5af;line-height:1.7;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:15px}.task-card-footer{display:flex;align-items:center;justify-content:space-between}.task-card-footer>span:last-child{font-size:9px;display:flex;align-items:center;gap:4px;color:#97a7a3}.status-badge{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#98a2ae;white-space:nowrap}.status-badge.running{color:#5a917e}.status-badge.approval{color:#bb8e59}.status-badge.completed{color:#7a8a94}.status-badge.failed{color:#bd7474}.status-badge.unknown{color:#b0906a}.status-dot{width:5px;height:5px;display:inline-block;border-radius:50%;background:#c3cbd3;flex-shrink:0}.status-dot.running{background:#77ac95;box-shadow:0 0 0 3px #77ac9512}.status-dot.approval{background:#d2a267;box-shadow:0 0 0 3px #d2a26713}.status-dot.completed{background:#92a4ad}.status-dot.failed{background:#c48484}.status-dot.unknown,.status-dot.cancelling{background:#b6a17d}.status-dot.interrupted{background:#a8aeb7}.task-panel-footer{font-size:8px;color:#a4afb9;display:flex;align-items:center;gap:6px;border-top:1px solid #edf0f3;padding:14px 17px}.task-detail{border:1px solid var(--border);border-radius:9px;background:#fff;min-width:0;overflow:hidden}.detail-header{padding:19px 21px 16px;display:flex;align-items:center;gap:15px;justify-content:space-between}.detail-title>.provider-label{margin-left:9px}.detail-title h2{font-size:15px;font-weight:600;margin-top:10px;line-height:1.6}.detail-actions{display:flex;align-items:center;gap:12px}.detail-actions>.status-badge{font-size:9px}.run-strip{display:flex;align-items:center;gap:22px;font-size:9px;color:#98a3ae;padding:10px 21px;background:#fbfcfd;border-top:1px solid #f0f2f4;border-bottom:1px solid #edf0f3}.run-strip>span{display:flex;gap:6px;align-items:center}.run-id{margin-left:auto;font-size:8px;letter-spacing:.5px;color:#b0b8c1}.execution-layout{display:grid;grid-template-columns:minmax(0,1fr) 205px;gap:0;padding:0}.graph-panel{min-width:0;border-right:1px solid #edf0f3}.graph-panel>.panel-heading{border-bottom:0;padding:17px 20px}.live-label{font-size:8px;color:#98a69e;display:flex;align-items:center;gap:6px}.graph-scroll{overflow:auto;width:100%;background:#fcfdfe;scrollbar-width:thin;scrollbar-color:#dfe8e3 transparent}.graph-canvas{position:relative;margin:0 auto}.graph-lines{position:absolute;inset:0}.edge{fill:none;stroke:#d4dfe1;stroke-width:1.3}.edge.active{stroke:#8fbea7;stroke-width:1.5;stroke-dasharray:4 5}.agent-node{position:absolute;width:170px;min-height:115px;border:1px solid #dde4eb;background:#fff;box-shadow:0 3px 8px #35465405;border-radius:8px;text-align:left;padding:10px 12px;z-index:1}.agent-node.selected{border-color:#7fb197;box-shadow:0 0 0 3px #a0c4b318}.agent-node.running{border-color:#a5c7b7}.agent-node.approval{border-color:#dac2a0}.agent-node:hover{box-shadow:0 4px 16px #293f4510}.node-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.node-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:6px;background:#edf4f1;color:#648e7d}.node-icon.tone-1{color:#a99b7d;background:#f7f2e9}.node-icon.tone-2{color:#8991b2;background:#f0f1f8}.node-icon.tone-3{color:#a38da5;background:#f5eff5}.agent-node>strong{font-size:11px;font-weight:600;display:inline-block;color:#435464}.node-role{font-size:8px;color:#a0aab6;margin-left:6px}.node-bottom{margin-top:9px;border-top:1px solid #f0f3f5;padding-top:8px;display:flex;justify-content:space-between;font-size:8px;color:#a6b0ba}.agent-node.running .node-bottom{color:#769a87}.agent-node.approval .node-bottom{color:#b39571}.graph-legend{display:flex;align-items:center;gap:14px;padding:14px 20px;color:#a2acb7;font-size:8px;border-top:1px solid #f0f3f5}.graph-legend>span{display:flex;align-items:center;gap:5px}.legend-dot{width:5px;height:5px;border-radius:50%;background:#8dac9a}.legend-dot.approval{background:#caae83}.legend-dot.completed{background:#a1adb6}.graph-hint{margin-left:auto;color:#b1bac3}.graph-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:13px;color:#9eacb7;font-size:11px}.graph-empty strong{color:#7d8c99;font-size:13px;font-weight:500}.graph-note{position:absolute;bottom:12px;left:20px;font-size:8px;color:#a1abb6}.inspector{padding-bottom:12px;display:flex;flex-direction:column;min-width:0}.inspector>.panel-heading{border-bottom:0;padding:17px 17px}.inspector-avatar{position:relative;display:grid;place-items:center;width:49px;height:49px;background:#edf5f0;color:#638c7a;border-radius:13px;margin:8px 18px 11px}.inspector-avatar>.status-dot{position:absolute;right:-2px;bottom:4px;border:2px solid #fff;width:9px;height:9px}.inspector h3{font-size:13px;font-weight:600;padding:0 18px}.inspector-role{font-size:8px;color:#9da8b3;padding:7px 18px 10px;line-height:1.7}.inspector-role>span{padding:0 4px}.inspector>.status-badge{margin:0 18px;font-size:8px}.inspector-rule{height:1px;background:#edf0f3;margin:17px}.inspector>label{font-size:8px;color:#a2aeb9;padding:0 18px;margin-bottom:7px;letter-spacing:.3px}.inspector-summary{font-size:10px;padding:0 18px;color:#73808e;line-height:1.9;margin-bottom:16px}.inspector-output{font-size:9px;line-height:1.9;color:#9aa6b2;padding:0 18px;max-height:100px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}.inspector-foot{margin:auto 18px 0;padding-top:22px;display:flex;align-items:center;gap:5px;color:#a2afba;font-size:8px}.inspector-empty{margin:auto;text-align:center;color:#a3b0ba;font-size:10px;padding:20px}.inspector-empty p{margin-top:10px}.approval-card{display:flex;align-items:flex-start;gap:13px;border:1px solid #eedfca;background:#fffcf6;border-radius:7px;margin:16px 19px;padding:15px}.approval-icon,.attention-item-icon{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:#bc966a;background:#f8efdF;flex-shrink:0}.approval-eyebrow{font-size:8px;color:#b6a082;letter-spacing:.7px}.approval-card h3{font-size:11px;font-weight:550;margin:4px 0 7px;color:#857258}.approval-card p{font-size:9px;color:#a79985;line-height:1.8}.approval-actions{display:flex;align-items:center;gap:15px;margin-top:13px}.approval-primary{display:inline-flex;align-items:center;gap:8px;background:#a6855d;color:#fff;border-radius:5px;font-size:9px;padding:7px 10px}.approval-primary:hover{background:#8d704d}.text-button{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#a49a8c;padding:5px 0}.text-button:hover{color:#6d8376}.activity-panel{border-top:1px solid #edf0f3}.activity-panel>.panel-heading{border-bottom:0;padding:16px 20px 10px}.subtle{font-size:8px;color:#a3afba}.activity-list{padding:0 20px 12px;max-height:192px;overflow:auto}.activity-row{display:flex;align-items:baseline;gap:9px;font-size:9px;line-height:1.8;margin:8px 0;color:#95a1ad}.activity-row time{font-size:8px;color:#bac2ca;font-variant-numeric:tabular-nums;flex-shrink:0}.activity-row strong{font-size:8px;font-weight:500;color:#7c8d99;flex-shrink:0;width:73px}.activity-row>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-mark{width:4px;height:4px;border-radius:50%;background:#b3c7bc;flex-shrink:0;align-self:center}.activity-mark.approval{background:#d9bd8d}.activity-mark.error{background:#bd8787}.activity-empty{font-size:10px;color:#aab5bf;padding:12px 0 20px}.steer-form{display:flex;align-items:center;gap:9px;margin:2px 19px 17px;padding:8px 11px;background:#f9fafb;border:1px solid #e9edf1;border-radius:6px;color:#a2afba}.steer-form input{background:none;border:0;outline:0;font-size:10px;flex:1;min-width:0}.steer-form button{background:#e9f1ed;color:#598f77;border-radius:5px;width:27px;height:26px;display:grid;place-items:center}.delivery-inline{margin:4px 19px 18px;padding:13px;background:#f3f8f5;border:1px solid #dfece3;border-radius:7px;display:flex;align-items:center;gap:10px}.delivery-icon{color:#6f9b83;display:flex}.delivery-inline>div{flex:1}.delivery-inline strong{font-size:10px;color:#67907a;display:block;margin-bottom:4px}.delivery-inline>div>span{font-size:8px;color:#9daf9f}.page-footer{display:flex;align-items:center;justify-content:space-between;font-size:8px;color:#adb7c2;padding:17px 2px 0}.page-footer>span{display:flex;gap:5px;align-items:center}.page-footer>span>span{padding:0 4px}.collection-panel,.settings-panel{border:1px solid var(--border);border-radius:9px;background:#fff;overflow:hidden;min-height:390px}.large-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:380px;color:#a9b8b1;gap:15px;text-align:center;padding:25px}.large-empty h2{font-size:16px;color:#718378;font-weight:500}.large-empty p{font-size:11px;color:#a4b0a9;line-height:1.8}.empty-list{padding:40px 5px;text-align:center;color:#a6b0b8;font-size:10px}.empty-list p{margin:10px 0}.empty-list button{font-size:10px;text-decoration:underline;color:#6d947f}.attention-item{display:flex;gap:15px;margin:20px;border:1px solid #eee4d5;border-radius:7px;background:#fffdf9;padding:20px}.attention-item h3{font-size:13px;font-weight:500;margin:8px 0;color:#857458}.attention-item p{font-size:11px;color:#a49b8c;line-height:1.8}.artifact-grid{padding:20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:17px}.artifact-card{text-align:left;border:1px solid #e4e9ed;background:#fcfdfd;padding:21px;border-radius:8px;position:relative}.artifact-card:hover{border-color:#b7cfbe;background:#fafdfb}.artifact-file-icon{display:grid;place-items:center;width:49px;height:55px;background:#eef4f0;color:#81a28f;border-radius:7px;margin-bottom:20px}.artifact-card>.provider-label{position:absolute;right:17px;top:20px}.artifact-card h3{font-size:12px;font-weight:500;margin-bottom:7px}.artifact-card p{font-size:10px;color:#95a2ae;line-height:1.7}.artifact-card>div{margin-top:24px;border-top:1px solid #e9eef1;padding-top:12px;display:flex;justify-content:space-between;font-size:9px;color:#a5b0bb}.settings-panel{max-width:980px}.settings-title{display:flex;align-items:center;padding:25px;gap:14px;border-bottom:1px solid #edf0f3}.settings-title h2{font-size:14px;font-weight:500}.settings-title p{font-size:10px;color:#9aa8b2;margin-top:8px}.settings-title>.provider-label{margin-left:auto}.settings-body{padding:0 25px 20px}.settings-line{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid #edf0f3;gap:20px}.settings-line strong{font-size:11px;font-weight:500}.settings-line p{font-size:10px;color:#9da9b4;margin-top:8px;line-height:1.7}.setting-value{font-size:9px;color:#7c9e8a;display:flex;align-items:center;gap:5px;white-space:nowrap}.settings-footnote{display:flex;gap:8px;color:#a2afba;font-size:10px;line-height:1.8;padding:21px 0 0}.settings-footnote>svg{margin-top:2px}.doctor-result{border:1px solid #e5e9ee;border-radius:7px;display:flex;gap:10px;padding:15px;margin-top:15px;font-size:11px;background:#fafbfd;color:#9ba6b2}.doctor-result.success{background:#f3f9f5;border-color:#dbece0;color:#739783}.doctor-result strong{font-size:11px;font-weight:500}.doctor-result p{font-size:10px;margin:7px 0}.doctor-result code{font-size:9px;color:#91a099;overflow-wrap:anywhere}.inline-notice{display:flex;align-items:center;gap:8px;margin:14px 19px;padding:12px;border-radius:6px;background:#fff9ef;color:#a88e67;font-size:10px;line-height:1.7}.settings-body>.inline-notice{margin:16px 0}.modal-backdrop{position:fixed;inset:0;background:#14233465;backdrop-filter:blur(3px);z-index:30;display:flex;align-items:center;justify-content:center;padding:25px}.new-task-modal{background:#fff;width:550px;border:1px solid #e3e8eb;border-radius:13px;box-shadow:0 15px 70px #14273625;max-height:calc(100vh - 50px);overflow:auto}.modal-heading{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f3;padding:20px 23px}.modal-heading>div{display:flex;align-items:center;gap:10px}.modal-heading h2{font-size:14px;font-weight:550}.modal-spark{display:flex;color:#699c83}.modal-body{padding:22px 24px}.modal-description{font-size:11px;color:#99a5b1;margin:0 0 22px;line-height:1.8}.modal-body label{display:block;font-size:10px;color:#728394;margin-bottom:9px}.modal-body label>input,.modal-body label>textarea{display:block;width:100%;margin-top:9px;margin-bottom:18px;border:1px solid #dfe6eb;border-radius:6px;background:#fcfdfd;padding:11px;font-size:11px;line-height:1.8;resize:vertical;outline:0}.scene-choices{display:flex;gap:10px;margin-bottom:21px}.scene-choices button{border:1px solid #e1e8ed;border-radius:6px;flex:1;padding:11px 13px;display:flex;align-items:center;gap:9px;font-size:11px;color:#8b99a8}.scene-choices button>svg{margin-left:auto;color:#699880}.scene-choices button.selected{background:#f1f8f3;border-color:#b9d4c4;color:#6f917d}.provider-choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}.provider-choices button{border:1px solid #e2e8ed;border-radius:6px;padding:13px;display:flex;align-items:center;gap:9px;text-align:left;color:#96a4af}.provider-choices button.selected{background:#f5faf7;border-color:#bed7c7;color:#789b84}.provider-choices strong{font-size:11px;display:block;font-weight:500}.provider-choices small{font-size:8px;display:block;margin-top:5px;color:#a1aea7}.provider-choices button>svg:last-child:not(:first-child){margin-left:auto}.new-task-note{display:flex;align-items:center;gap:7px;font-size:9px;color:#a0afa5;margin-top:18px;line-height:1.8}.modal-footer{padding:17px 24px;display:flex;justify-content:flex-end;align-items:center;gap:10px;background:#fbfcfc;border-top:1px solid #eaf0ed}.modal-footer>span{font-size:9px;color:#a7b2bb;margin-right:auto}.artifact-modal{width:740px;border-radius:12px;background:#fff;overflow:hidden;border:1px solid #e1e7eb}.artifact-modal pre{white-space:pre-wrap;word-break:break-word;padding:25px;font-family:inherit;font-size:12px;line-height:2;color:#72808f;max-height:60vh;overflow-y:auto;margin:0}.toast{position:fixed;bottom:25px;left:calc(50% + 96px);transform:translateX(-50%);z-index:50;background:#253b36;color:#e3eee8;box-shadow:0 4px 25px #12272021;border:1px solid #446055;border-radius:8px;display:flex;align-items:center;gap:10px;padding:13px 16px;font-size:11px;max-width:650px;line-height:1.7}.toast .icon-button{color:#a3bcae}.spin{animation:spin 1.2s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
++@media(max-width:1280px){.sidebar{width:174px;padding-left:11px;padding-right:11px}.main-shell{margin-left:174px;width:calc(100% - 174px)}.page-content{padding:24px 20px 16px}.workbench{grid-template-columns:216px minmax(0,1fr);gap:14px}.execution-layout{grid-template-columns:minmax(0,1fr)}.inspector{display:grid;grid-template-columns:50px 1fr 1fr;gap:7px 12px;padding:15px 18px;border-top:1px solid #edf0f3}.inspector>.panel-heading{display:none}.inspector-avatar{grid-row:1/4;margin:0;align-self:center}.inspector h3{padding:0;grid-column:2}.inspector-role{padding:0;grid-column:2;grid-row:2}.inspector>.status-badge{margin:0;grid-column:2;grid-row:3}.inspector>label,.inspector-rule,.inspector-foot{display:none}.inspector-summary{padding:0;margin:0;grid-column:3;grid-row:1/2;font-size:9px}.inspector-output{padding:0;grid-column:3;grid-row:2/4;max-height:47px;font-size:8px}.graph-panel{border-right:0}.run-strip{gap:15px}.run-id{display:none}.detail-header{align-items:flex-start}.detail-actions{flex-direction:column;gap:10px;padding-top:5px}.metric{padding:16px 14px}.toast{left:calc(50% + 87px)}}
++@media(max-width:1050px){.sidebar{width:155px}.main-shell{margin-left:155px;width:calc(100% - 155px)}.brand{font-size:21px;gap:6px;padding-left:2px}.brand img{width:33px;height:33px}.brand-sub{font-size:8px}.workspace{font-size:9px;padding:9px 6px}.nav-item{font-size:10px;padding:11px 8px;gap:8px}.workbench{grid-template-columns:190px minmax(0,1fr);gap:11px}.page-content{padding:22px 15px 12px}.page-heading h1{font-size:22px}.primary-button>span{display:none}.metric strong{font-size:21px}.metric-icon{width:30px;height:30px}.metric{gap:9px;padding:12px}.metric-note{display:none}.detail-header{padding:16px}.detail-title h2{font-size:13px}.task-card{padding:13px 10px}.task-tabs{gap:15px}.scene-dot{width:5px;height:5px}.sidebar-bottom .local-card{display:none}.topbar{padding:0 20px}.page-footer{font-size:7px}}
++@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
++
++.brand-sub{white-space:nowrap;letter-spacing:.5px;font-size:9px}
++
++.real-approval-form{margin-top:12px}.real-approval-form label{display:block;color:#a19582;font-size:9px;margin-bottom:10px}.real-approval-form textarea{display:block;width:100%;min-width:260px;background:#fff;border:1px solid #e9ddc9;border-radius:5px;padding:9px;margin-top:6px;font-size:10px;line-height:1.7;resize:vertical}.real-approval-form button{margin-top:2px}
+--- /dev/null
++++ b/src/model.ts
+@@ -0,0 +1,104 @@
++export type Status = 'queued' | 'running' | 'approval' | 'cancelling' | 'interrupted' | 'completed' | 'failed' | 'unknown';
++export type Scene = 'research' | 'coding' | 'writing';
++export type Provider = 'demo' | 'codex';
++export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null }
++export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
++export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
++export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
++export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
++export type Action = { type: 'start' | 'tick' | 'cancel' } | { type: 'approve' | 'decline'; id: string } | { type: 'steer'; text: string };
++
++export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
++export const sceneLabels: Record<Scene, string> = { research: '调研', coding: '编程', writing: '写作' };
++export const isActive = (status: Status) => ['running', 'approval', 'cancelling'].includes(status);
++export const isTerminal = (status: Status) => ['completed', 'failed', 'interrupted'].includes(status);
++
++function log(task: Task, text: string, now: number, agent = '工作台', kind = 'system'): Task {
++  return { ...task, revision: task.revision + 1, events: [...task.events, { id: `${task.id}-${task.revision}-${now}`, at: now, kind, agent, text }].slice(-100) };
++}
++
++function demoNodes(): AgentNode[] {
++  return [
++    {id:'lead', name:'Coordinator', role:'主 Agent', model:'演示 · 协调', status:'running', summary:'拆解目标，协调交付', output:'将任务拆成探索、分析与复核三个步骤。等待各阶段结果，汇总成可验收的交付。', parentId:null},
++    {id:'scout',name:'Scout',role:'探索者',model:'演示 · 探索',status:'queued',summary:'查找资料与上下文',output:'',parentId:'lead'},
++    {id:'analyst',name:'Analyst',role:'研究者',model:'演示 · 分析',status:'queued',summary:'对比方案，形成结论',output:'',parentId:'lead'},
++    {id:'reviewer',name:'Reviewer',role:'审查者',model:'演示 · 复核',status:'queued',summary:'核对证据与边界',output:'',parentId:'lead'},
++  ];
++}
++
++export function makeTask(title: string, prompt: string, scene: Scene, provider: Provider, now = Date.now()): Task {
++  return { id: crypto.randomUUID(), title: title.trim(), prompt: prompt.trim(), scene, provider, status:'queued', createdAt:now, startedAt:null, finishedAt:null, runId:null, threadId:null, turnId:null, revision:0, phase:0, nodes:provider==='demo'?demoNodes().map(n=>({...n,status:'queued'})):[], events:[], approvals:[], artifacts:[], tokens:null };
++}
++
++function delivery(task: Task): Artifact {
++  const bodies: Record<Scene,string> = {
++    research: `# ${task.title}\n\n这是演示模式生成的示例交付，不是实际检索结果。\n\n## 建议方案\n\n选择本地桌面架构，使用 Tauri 管理窗口和进程，任务内部协作由执行器负责。优先跑通真实状态、审批与交付。\n\n## 复核意见\n\n- 将任务与运行尝试分开记录。\n- 断线后先核对状态，不自动重复工具调用。\n- 中断请求不能等同于所有外部副作用已撤销。\n\n## 下一步\n\n用一个调研任务和一个编程任务验证完整闭环。\n\n任务目标：${task.prompt}`,
++    coding: `# ${task.title}\n\n演示交付 · 没有实际修改仓库。\n\n## 变更建议\n\n把任务状态归到单一执行器，界面只消费状态投影；审批使用运行 ID 与请求 ID 关联。\n\n## 验证范围\n\n重复点击、取消与结束同时发生、重启后的过期审批。\n\n任务目标：${task.prompt}`,
++    writing: `# ${task.title}\n\n演示交付 · 文档草稿\n\n把注意力留给真正需要判断的地方。\n\n在一个工作台里发起任务，看见 Agent 如何协作，在必要时补充信息，最后收取清晰、可检查的成果。\n\n## 产品主张\n\n让多个任务持续推进，让每一次介入都有上下文，让每一份交付都有去处。\n\n任务目标：${task.prompt}`,
++  };
++  return {id:`${task.id}-delivery`,name:task.scene==='research'?'方案调研与可行性.md':task.scene==='coding'?'变更建议与验证.md':'产品介绍草稿.md',kind:'markdown',content:bodies[task.scene],createdAt:Date.now()};
++}
++
++export function reduceTask(task: Task, action: Action, now = Date.now()): Task {
++  if(task.provider!=='demo') return task;
++  if(action.type==='start' && !isActive(task.status)) {
++    return log({...task,status:'running',startedAt:now,finishedAt:null,runId:`${task.id}-${now}`,turnId:`turn-${now}`,phase:0,nodes:demoNodes(),approvals:[],artifacts:[],tokens:null},'已启动演示任务，不调用模型',now);
++  }
++  if(isTerminal(task.status)) return task;
++  if(action.type==='cancel' && isActive(task.status)) return log({...task,status:'interrupted',finishedAt:now,approvals:[],nodes:task.nodes.map(n=>n.status==='completed'?n:{...n,status:'interrupted'})},'演示任务已中断',now);
++  if(action.type==='steer' && isActive(task.status) && action.text.trim()) return log(task,`补充方向：${action.text.trim().slice(0,2000)}`,now,'你','input');
++  if(action.type==='approve' || action.type==='decline') {
++    const request=task.approvals.find(a=>a.id===action.id && a.runId===task.runId && a.turnId===task.turnId && a.requestId===action.id);
++    if(task.status!=='approval' || !request) return task;
++    if(action.type==='decline') return log({...task,status:'interrupted',finishedAt:now,approvals:[],nodes:task.nodes.map(n=>n.status==='completed'?n:{...n,status:'interrupted'})},'你拒绝了继续执行，演示已停止',now,'你','approval');
++    return log({...task,status:'running',approvals:[],nodes:task.nodes.map(n=>n.status==='approval'?{...n,status:'running'}:n)},'已确认：按个人桌面场景继续',now,'你','approval');
++  }
++  if(action.type!=='tick' || task.status!=='running') return task;
++  const phase=task.phase+1;
++  let next={...task,phase};
++  const change=(id:string,status:Status,summary:string,output:string)=>{ next={...next,nodes:next.nodes.map(n=>n.id===id?{...n,status,summary,output}:n)}; };
++  if(phase===1) {
++    change('scout','running','正在收集相关上下文','检索相关资料，整理候选方案与信息缺口。');
++    return log(next,'已委派 Scout 收集上下文',now,'Coordinator','agent');
++  }
++  if(phase===2) {
++    change('scout','completed','上下文已整理','找到三条候选技术路线，已整理各自的接入方式、能力与限制。演示数据未进行真实检索。');
++    change('analyst','running','正在对比候选方案','从交互、进程管理与恢复成本三个角度对比方案。');
++    return log(next,'Scout 返回资料摘要，Analyst 开始分析',now,'Analyst','agent');
++  }
++  if(phase===3) {
++    change('analyst','approval','需要确认交付范围','个人桌面与团队协作的权限、同步和分发成本差异较大。建议本次聚焦个人桌面。');
++    const id=`${task.runId}-scope`;
++    return log({...next,status:'approval',approvals:[{id,requestId:id,runId:task.runId!,turnId:task.turnId!,title:'确认本次交付范围',description:'建议先聚焦个人桌面工作台，将团队同步与云端运行留到后续。是否按这个范围继续？',kind:'input',questionIds:[]}]},'需要你确认范围，任务已等待',now,'Analyst','approval');
++  }
++  if(phase===4) {
++    change('analyst','completed','对比与结论已完成','建议先实现本地任务、执行记录、审批与交付；由原生 Agent 运行器负责内部协作。');
++    change('reviewer','running','正在核对边界','复核状态、审批过期与中断语义；检查是否把未知状态误报为成功。');
++    return log(next,'分析已完成，Reviewer 开始复核',now,'Reviewer','agent');
++  }
++  if(phase>=5) {
++    next={...next,status:'completed',finishedAt:now,nodes:next.nodes.map(n=>({...n,status:'completed',summary:n.id==='reviewer'?'复核完成 · 边界已记录':n.id==='lead'?'已汇总交付，等待验收':n.summary,output:n.id==='reviewer'?'复核意见：重启需要核对状态；审批不可跨运行复用；真实取消需等待执行器确认。':n.output})),artifacts:[delivery(task)]};
++    return log(next,'执行结束，已生成演示交付，等待你验收',now,'Coordinator','agent');
++  }
++  return next;
++}
++
++export function recoverTasks(tasks: Task[]): Task[] {
++  return tasks.map(task=>isActive(task.status)?{...task,status:'unknown',approvals:[],nodes:task.nodes.map(n=>isActive(n.status)?{...n,status:'unknown'}:n)}:task);
++}
++
++export function applyRuntime(task: Task, incoming: Task): Task {
++  if(task.id!==incoming.id || task.provider!=='codex' || incoming.provider!=='codex' || (task.runId!==null && task.runId!==incoming.runId) || incoming.revision<=task.revision) return task;
++  if(isTerminal(task.status) && incoming.status!==task.status) return task;
++  return incoming;
++}
++
++export function seedTasks(): Task[] {
++  const now=Date.now();
++  let research=makeTask('个人 Agent 工作台技术调研','比较桌面技术路线，形成适合个人使用的实现建议与可行性边界。','research','demo',now-60000);
++  research=reduceTask(research,{type:'start'},now);
++  const coding=makeTask('梳理任务状态与审批机制','设计任务状态流转，避免旧审批和迟到事件影响新运行。','coding','demo',now-120000);
++  let writing=makeTask('写一份产品介绍','围绕多任务推进、必要介入和交付验收，写一份简短产品介绍。','writing','demo',now-3600000);
++  writing={...writing,status:'completed',nodes:demoNodes().map(n=>({...n,status:'completed'})),finishedAt:now-1800000,runId:'demo-writing',revision:5,artifacts:[delivery(writing)]};
++  return [research,coding,writing];
++}
+--- /dev/null
++++ b/src/bridge.ts
+@@ -0,0 +1,37 @@
++import { invoke, isTauri } from '@tauri-apps/api/core';
++import { listen } from '@tauri-apps/api/event';
++import { recoverTasks } from './model';
++import type { Task } from './model';
++
++export const desktop = isTauri();
++const STORAGE_KEY='orbit-demo-v1';
++export interface Doctor { available: boolean; initialized: boolean; path: string; version: string; message: string }
++
++export async function loadTasks(): Promise<{tasks:Task[];error:string|null}> {
++  if(desktop) return invoke('load_workspace');
++  const raw=localStorage.getItem(STORAGE_KEY);
++  if(!raw) return {tasks:[],error:null};
++  try {
++    const tasks=JSON.parse(raw);
++    if(!Array.isArray(tasks) || tasks.length>50 || tasks.some(t=>!t || t.provider!=='demo' || typeof t.id!=='string' || typeof t.title!=='string' || !Array.isArray(t.nodes) || !Array.isArray(t.events) || !Array.isArray(t.approvals) || !Array.isArray(t.artifacts))) throw new Error('invalid snapshot');
++    return {tasks:recoverTasks(tasks),error:null};
++  } catch { return {tasks:[],error:'本地演示记录无法读取，原记录已保留。当前展示临时演示数据。'}; }
++}
++export async function saveDemo(tasks: Task[]) {
++  const demo=tasks.filter(t=>t.provider==='demo').slice(0,50);
++  if(desktop) await invoke('save_demo',{tasks:demo});
++  else localStorage.setItem(STORAGE_KEY,JSON.stringify(demo));
++}
++export async function watchRuntime(callback:(task:Task)=>void,onWarning:(message:string)=>void) {
++  if(!desktop)return ()=>{};
++  const releaseTask=await listen<Task>('runtime-task',event=>callback(event.payload));
++  const releaseWarning=await listen<string>('runtime-warning',event=>onWarning(event.payload));
++  return ()=>{releaseTask();releaseWarning();};
++}
++export const checkCli=()=>invoke<Doctor>('doctor');
++export const exportArtifact=(artifactId:string)=>invoke<string>('export_artifact',{artifactId});
++export const createReal=(title:string,prompt:string,scene:string)=>invoke<Task>('create_task',{title,prompt,scene});
++export const startReal=(task:Task)=>invoke<Task>('start_run',{taskId:task.id});
++export const steerReal=(runId:string,text:string)=>invoke('steer_run',{runId,text});
++export const cancelReal=(runId:string)=>invoke('interrupt_run',{runId});
++export const replyReal=(runId:string,approvalId:string,answers:Record<string,string>)=>invoke('reply_input',{runId,approvalId,answers});
+--- /dev/null
++++ b/src/Graph.tsx
+@@ -0,0 +1,44 @@
++import { Bot, Compass, Microscope, ShieldCheck, CircleHelp } from 'lucide-react';
++import { statusLabels } from './model';
++import type { AgentNode } from './model';
++
++export function Graph({nodes,selected,onSelect}:{nodes:AgentNode[];selected:string|null;onSelect:(id:string)=>void}) {
++  const roots=nodes.filter(n=>!n.parentId || !nodes.some(p=>p.id===n.parentId));
++  const levels=new Map<string,number>();
++  function depth(node:AgentNode,seen=new Set<string>()):number {
++    if(seen.has(node.id)) return 0;
++    seen.add(node.id); const parent=nodes.find(n=>n.id===node.parentId);
++    return parent?Math.min(depth(parent,seen)+1,5):0;
++  }
++  nodes.forEach(n=>levels.set(n.id,depth(n)));
++  const rows=new Map<number,AgentNode[]>();
++  nodes.forEach(n=>{const d=levels.get(n.id)!;rows.set(d,[...(rows.get(d)||[]),n]);});
++  const width=Math.max(650,...[...rows.values()].map(row=>row.length*196+48));
++  const height=Math.max(360,(Math.max(0,...levels.values())+1)*165+62);
++  const positions=new Map<string,{x:number;y:number}>();
++  rows.forEach((row,level)=>row.forEach((node,i)=>positions.set(node.id,{x:width/2+(i-(row.length-1)/2)*196,y:52+level*165})));
++  const icons=[Bot,Compass,Microscope,ShieldCheck];
++  return <div className="graph-scroll"><div className="graph-canvas" style={{minWidth:width,height}}>
++    <svg width={width} height={height} className="graph-lines" aria-hidden="true">
++      <defs><pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.8" fill="#dfe4e9"/></pattern></defs>
++      <rect width="100%" height="100%" fill="url(#dots)"/>
++      {nodes.map(node=>{
++        const from=node.parentId?positions.get(node.parentId):null,to=positions.get(node.id)!;
++        if(!from)return null;
++        const d=`M ${from.x} ${from.y+92} C ${from.x} ${from.y+135}, ${to.x} ${to.y-40}, ${to.x} ${to.y}`;
++        const active=node.status==='running';
++        return <g key={node.id}><path d={d} className={active?'edge active':'edge'}/>{active&&<circle r="3.5" fill="#42a88b"><animateMotion dur="2.5s" repeatCount="indefinite" path={d}/></circle>}</g>;
++      })}
++    </svg>
++    {nodes.map((node,i)=>{
++      const p=positions.get(node.id)!,Icon=icons[i%icons.length]||CircleHelp;
++      return <button key={node.id} className={`agent-node ${node.status} ${selected===node.id?'selected':''}`} style={{left:p.x-85,top:p.y}} onClick={()=>onSelect(node.id)} aria-label={`查看 ${node.name} · ${statusLabels[node.status]}`}>
++        <span className="node-top"><span className={`node-icon tone-${i%4}`}><Icon size={16}/></span><span className={`status-dot ${node.status}`}/></span>
++        <strong>{node.name}</strong><span className="node-role">{node.role}</span>
++        <span className="node-bottom"><span>{statusLabels[node.status]}</span><span>{node.status==='running'?'•••':node.status==='completed'?'✓':'—'}</span></span>
++      </button>;
++    })}
++    {!nodes.length&&<div className="graph-empty"><Bot size={34}/><strong>Agent 将在这里出现</strong><span>启动任务后，显示执行器实际观测到的关系。</span></div>}
++    {roots.length>1&&<div className="graph-note">未确认父子关系的 Agent 独立显示</div>}
++  </div></div>;
++}
+--- /dev/null
++++ b/src-tauri/src/protocol.rs
+@@ -0,0 +1,339 @@
++use crate::model::{now, Artifact, Node, Task};
++use serde_json::Value;
++use std::io::{BufRead, Read};
++
++pub const MAX_MESSAGE: usize = 1024 * 1024;
++pub fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String> {
++    loop {
++        let mut bytes = Vec::new();
++        Read::take(&mut *reader, (MAX_MESSAGE + 1) as u64)
++            .read_until(b'\n', &mut bytes)
++            .map_err(|_| "无法读取执行器消息".to_string())?;
++        if bytes.is_empty() {
++            return Ok(None);
++        }
++        if bytes.len() > MAX_MESSAGE {
++            return Err("执行器消息超过 1 MiB 限制".into());
++        }
++        if bytes.last() != Some(&b'\n') {
++            return Err("执行器消息被截断".into());
++        }
++        if bytes.iter().all(|b| b.is_ascii_whitespace()) {
++            continue;
++        }
++        return serde_json::from_slice(&bytes)
++            .map(Some)
++            .map_err(|_| "执行器返回了非法 JSON".into());
++    }
++}
++
++fn text<'a>(value: &'a Value, key: &str) -> &'a str {
++    value.get(key).and_then(Value::as_str).unwrap_or("")
++}
++fn node_status(value: &str) -> String {
++    match value {
++        "running" | "inProgress" => "running",
++        "completed" => "completed",
++        "interrupted" | "shutdown" => "interrupted",
++        "errored" | "failed" => "failed",
++        "pendingInit" => "queued",
++        _ => "unknown",
++    }
++    .into()
++}
++fn append_bounded(target: &mut String, value: &str) {
++    let remaining = 64000usize.saturating_sub(target.chars().count());
++    target.extend(value.chars().take(remaining));
++}
++
++pub fn project(task: &mut Task, message: &Value) -> bool {
++    let method = text(message, "method");
++    let p = &message["params"];
++    let root = task.thread_id.clone().unwrap_or_default();
++    let thread = text(p, "threadId");
++    if method == "thread/started" {
++        let t = &p["thread"];
++        let id = text(t, "id");
++        let parent = text(t, "parentThreadId");
++        if id == root
++            || id.is_empty()
++            || parent.is_empty()
++            || (parent != root && !task.nodes.iter().any(|n| n.id == parent))
++            || task.nodes.len() >= 64
++        {
++            return false;
++        }
++        if !task.nodes.iter().any(|n| n.id == id) {
++            task.nodes.push(Node {
++                id: id.into(),
++                name: text(t, "agentNickname").to_string(),
++                role: text(t, "agentRole").to_string(),
++                model: "CLI 默认模型".into(),
++                status: "running".into(),
++                summary: "已观测到子 Agent".into(),
++                output: String::new(),
++                parent_id: Some(parent.into()),
++            });
++        }
++        task.revision += 1;
++        return true;
++    }
++    if thread.is_empty() || (thread != root && !task.nodes.iter().any(|n| n.id == thread)) {
++        return false;
++    }
++    if let Some(turn) = p.get("turnId").and_then(Value::as_str) {
++        if thread == root && task.turn_id.as_deref() != Some(turn) {
++            return false;
++        }
++    }
++    if task.terminal() {
++        return false;
++    }
++    task.root_node();
++    match method {
++        "turn/started" if thread == root => {
++            let id = text(&p["turn"], "id");
++            if id.is_empty() {
++                return false;
++            }
++            task.turn_id = Some(id.into());
++            task.event("执行器已开始本轮任务", "agent", "Codex");
++        }
++        "turn/completed" if thread == root => {
++            let turn = &p["turn"];
++            if task.turn_id.as_deref() != Some(text(turn, "id")) {
++                return false;
++            }
++            let status = text(turn, "status");
++            task.status = match status {
++                "completed" => "completed",
++                "interrupted" => "interrupted",
++                _ => "failed",
++            }
++            .into();
++            task.finished_at = Some(now());
++            task.approvals.clear();
++            if let Some(n) = task.nodes.iter_mut().find(|n| n.id == root) {
++                n.status = task.status.clone();
++                n.summary = if status == "completed" {
++                    "本轮执行结束，等待验收"
++                } else {
++                    "本轮执行已终止"
++                }
++                .into();
++            }
++            for node in &mut task.nodes {
++                if node.id != root
++                    && matches!(node.status.as_str(), "running" | "approval" | "queued")
++                {
++                    node.status = "unknown".into();
++                }
++            }
++            if status == "completed" {
++                let content = task
++                    .nodes
++                    .iter()
++                    .find(|n| n.id == root)
++                    .map(|n| n.output.clone())
++                    .unwrap_or_default();
++                if !content.is_empty() {
++                    task.artifacts.push(Artifact {
++                        id: format!("{}-result", task.run_id.as_deref().unwrap_or("run")),
++                        name: "codex-result.md".into(),
++                        kind: "markdown".into(),
++                        content,
++                        created_at: now(),
++                    });
++                }
++            }
++            task.event(
++                if status == "completed" {
++                    "本轮执行结束，输出等待验收"
++                } else if status == "interrupted" {
++                    "执行器确认本轮已中断"
++                } else {
++                    "执行器报告本轮失败"
++                },
++                "agent",
++                "Codex",
++            );
++        }
++        "item/agentMessage/delta" => {
++            if let Some(n) = task.nodes.iter_mut().find(|n| n.id == thread) {
++                append_bounded(&mut n.output, text(p, "delta"));
++            }
++            task.revision += 1;
++        }
++        "item/started" | "item/completed" => {
++            let item = &p["item"];
++            match text(item, "type") {
++                "agentMessage" if method == "item/completed" => {
++                    if let Some(n) = task.nodes.iter_mut().find(|n| n.id == thread) {
++                        n.output = text(item, "text").chars().take(64000).collect();
++                    }
++                    task.revision += 1;
++                }
++                "collabAgentToolCall" => {
++                    let sender = text(item, "senderThreadId");
++                    let spawn = text(item, "tool") == "spawnAgent";
++                    if let Some(states) = item["agentsStates"].as_object() {
++                        for (id, state) in states {
++                            let parent = if spawn
++                                && (sender == root || task.nodes.iter().any(|n| n.id == sender))
++                            {
++                                Some(sender.to_string())
++                            } else {
++                                None
++                            };
++                            if let Some(n) = task.nodes.iter_mut().find(|n| &n.id == id) {
++                                n.status = node_status(text(state, "status"));
++                                if parent.is_some() && n.parent_id.is_none() {
++                                    n.parent_id = parent;
++                                }
++                                let output = text(state, "message");
++                                if !output.is_empty() {
++                                    n.output = output.chars().take(64000).collect();
++                                }
++                            } else if task.nodes.len() < 64 {
++                                task.nodes.push(Node {
++                                    id: id.clone(),
++                                    name: format!(
++                                        "Agent {}",
++                                        &id.chars().take(6).collect::<String>()
++                                    ),
++                                    role: "子 Agent".into(),
++                                    model: text(item, "model").to_string(),
++                                    status: node_status(text(state, "status")),
++                                    summary: "状态来自协作调用".into(),
++                                    output: text(state, "message").chars().take(64000).collect(),
++                                    parent_id: parent,
++                                });
++                            }
++                        }
++                    }
++                    task.event(
++                        &format!("协作调用：{}", text(item, "tool")),
++                        "agent",
++                        "Codex",
++                    );
++                }
++                "commandExecution" | "fileChange" => {
++                    task.event(
++                        if method == "item/started" {
++                            "工具开始执行"
++                        } else {
++                            "工具执行结束"
++                        },
++                        "tool",
++                        "Codex",
++                    );
++                }
++                _ => return false,
++            }
++        }
++        "thread/tokenUsage/updated" if thread == root => {
++            task.tokens = p["tokenUsage"]["total"]["totalTokens"].as_u64();
++            task.revision += 1;
++        }
++        "serverRequest/resolved" => {
++            let id = p["requestId"].to_string();
++            task.approvals.retain(|a| a.request_id != id);
++            if task.approvals.is_empty() && task.status == "approval" {
++                task.status = "running".into();
++            }
++            task.revision += 1;
++        }
++        _ => return false,
++    }
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::model::Approval;
++    use serde_json::json;
++
++    fn fixture() -> Task {
++        let mut task = Task::new("Test".into(), "Test".into(), "research".into());
++        task.thread_id = Some("root".into());
++        task.turn_id = Some("turn-1".into());
++        task
++    }
++    #[test]
++    fn completion_ignores_old_turn_and_is_terminal() {
++        let mut task = fixture();
++        assert!(!project(
++            &mut task,
++            &json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"old","status":"completed"}}})
++        ));
++        assert!(project(
++            &mut task,
++            &json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"completed"}}})
++        ));
++        assert_eq!(task.status, "completed");
++        assert!(!project(
++            &mut task,
++            &json!({"method":"turn/started","params":{"threadId":"root","turn":{"id":"new","status":"inProgress"}}})
++        ));
++    }
++    #[test]
++    fn framing_handles_multiple_messages_eof_and_invalid_json() {
++        let mut bytes = std::io::Cursor::new(b"{\"id\":1}\n{\"id\":2}\n".to_vec());
++        assert_eq!(read_message(&mut bytes).unwrap().unwrap()["id"], 1);
++        assert_eq!(read_message(&mut bytes).unwrap().unwrap()["id"], 2);
++        assert!(read_message(&mut bytes).unwrap().is_none());
++        assert!(read_message(&mut std::io::Cursor::new(b"oops\n")).is_err());
++    }
++    #[test]
++    fn spawn_links_child_but_send_message_does_not_invent_parent() {
++        let mut task = fixture();
++        project(
++            &mut task,
++            &json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"item-1","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"root","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"running","message":"working"}}}}}),
++        );
++        assert_eq!(
++            task.nodes
++                .iter()
++                .find(|n| n.id == "child")
++                .unwrap()
++                .parent_id
++                .as_deref(),
++            Some("root")
++        );
++        project(
++            &mut task,
++            &json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"item-2","type":"collabAgentToolCall","tool":"sendMessage","senderThreadId":"root","receiverThreadIds":["other"],"agentsStates":{"other":{"status":"running"}}}}}),
++        );
++        assert!(task
++            .nodes
++            .iter()
++            .find(|n| n.id == "other")
++            .unwrap()
++            .parent_id
++            .is_none());
++    }
++    #[test]
++    fn recovery_invalidates_pending_approvals() {
++        let mut task = fixture();
++        task.status = "approval".into();
++        task.approvals.push(Approval {
++            id: "a".into(),
++            request_id: "1".into(),
++            run_id: task.run_id.clone().unwrap(),
++            turn_id: "turn-1".into(),
++            title: "Ask".into(),
++            description: "".into(),
++            kind: "input".into(),
++            question_ids: vec![],
++        });
++        task.recover();
++        assert_eq!(task.status, "unknown");
++        assert!(task.approvals.is_empty());
++    }
++    #[test]
++    fn reader_rejects_truncated_and_oversized_messages() {
++        assert!(read_message(&mut std::io::Cursor::new(b"{\"id\":1}")).is_err());
++        assert!(read_message(&mut std::io::Cursor::new(vec![b'x'; MAX_MESSAGE + 2])).is_err());
++    }
++}
+--- /dev/null
++++ b/src-tauri/src/lib.rs
+@@ -0,0 +1,130 @@
++mod model;
++mod protocol;
++#[cfg(feature = "desktop")]
++mod runner;
++#[cfg(feature = "desktop")]
++mod store;
++
++#[cfg(feature = "desktop")]
++mod desktop {
++    use super::{
++        model::Task,
++        runner::{self, Runtime},
++        store::{Store, Workspace},
++    };
++    use tauri::{AppHandle, Manager, State};
++
++    #[tauri::command]
++    fn load_workspace(runtime: State<Runtime>) -> Workspace {
++        runtime.store.workspace()
++    }
++    #[tauri::command]
++    fn save_demo(runtime: State<Runtime>, tasks: Vec<Task>) -> Result<(), String> {
++        runtime.store.save_demo(tasks)
++    }
++    #[tauri::command]
++    fn export_artifact(runtime: State<Runtime>, artifact_id: String) -> Result<String, String> {
++        runtime.store.export_artifact(&artifact_id)
++    }
++    #[tauri::command]
++    async fn doctor() -> Result<runner::Doctor, String> {
++        tauri::async_runtime::spawn_blocking(runner::doctor)
++            .await
++            .map_err(|_| "连接检查进程失败".into())
++    }
++    #[tauri::command]
++    fn create_task(
++        runtime: State<Runtime>,
++        title: String,
++        prompt: String,
++        scene: String,
++    ) -> Result<Task, String> {
++        runtime.create(title, prompt, scene)
++    }
++    #[tauri::command]
++    async fn start_run(
++        app: AppHandle,
++        runtime: State<'_, Runtime>,
++        task_id: String,
++    ) -> Result<Task, String> {
++        let owned = runtime.inner().clone();
++        tauri::async_runtime::spawn_blocking(move || owned.start(app, task_id))
++            .await
++            .map_err(|_| "启动进程失败".to_string())?
++    }
++    #[tauri::command]
++    fn steer_run(
++        app: AppHandle,
++        runtime: State<Runtime>,
++        run_id: String,
++        text: String,
++    ) -> Result<(), String> {
++        runtime.steer(&app, run_id, text)
++    }
++    #[tauri::command]
++    fn interrupt_run(
++        app: AppHandle,
++        runtime: State<Runtime>,
++        run_id: String,
++    ) -> Result<(), String> {
++        runtime.interrupt(app, run_id)
++    }
++    #[tauri::command]
++    fn reply_input(
++        app: AppHandle,
++        runtime: State<Runtime>,
++        run_id: String,
++        approval_id: String,
++        answers: std::collections::HashMap<String, String>,
++    ) -> Result<(), String> {
++        runtime.reply(&app, run_id, approval_id, answers)
++    }
++
++    pub fn run() {
++        // Distribution smoke check: same binary and CLI lookup as the UI, without
++        // opening a window, creating a task, or invoking a model.
++        if std::env::args().skip(1).any(|arg| arg == "--doctor") {
++            let result = runner::doctor();
++            println!(
++                "{}",
++                serde_json::to_string(&result).expect("doctor serialization")
++            );
++            return;
++        }
++        let app = tauri::Builder::default()
++            .setup(|app| {
++                let directory = app.path().app_data_dir()?;
++                let store = Store::open(directory).map_err(std::io::Error::other)?;
++                app.manage(Runtime::new(store));
++                Ok(())
++            })
++            .invoke_handler(tauri::generate_handler![
++                load_workspace,
++                save_demo,
++                export_artifact,
++                doctor,
++                create_task,
++                start_run,
++                steer_run,
++                interrupt_run,
++                reply_input
++            ])
++            .on_window_event(|window, event| {
++                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
++                    window.state::<Runtime>().shutdown();
++                }
++            })
++            .build(tauri::generate_context!())
++            .expect("unable to start Orbit");
++        app.run(|app, event| {
++            if matches!(
++                event,
++                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
++            ) {
++                app.state::<Runtime>().shutdown();
++            }
++        });
++    }
++}
++#[cfg(feature = "desktop")]
++pub use desktop::run;
+--- /dev/null
++++ b/src-tauri/src/store.rs
+@@ -0,0 +1,280 @@
++use crate::model::Task;
++use serde::{Deserialize, Serialize};
++use std::{
++    fs::{self, File},
++    io::{Read, Write},
++    path::PathBuf,
++    sync::Mutex,
++};
++
++const MAX_STORE: u64 = 8 * 1024 * 1024;
++#[derive(Clone, Default, Serialize, Deserialize)]
++pub struct Workspace {
++    pub tasks: Vec<Task>,
++    #[serde(default)]
++    pub error: Option<String>,
++}
++#[derive(Serialize, Deserialize)]
++struct Disk {
++    version: u32,
++    tasks: Vec<Task>,
++}
++pub struct Store {
++    pub directory: PathBuf,
++    data: Mutex<Workspace>,
++}
++
++impl Store {
++    pub fn open(directory: PathBuf) -> Result<Self, String> {
++        fs::create_dir_all(&directory).map_err(|_| "无法创建本地记录目录".to_string())?;
++        let file = directory.join("workspace.json");
++        let data = if file.exists() {
++            let read = (|| -> Result<Vec<Task>, String> {
++                let mut bytes = Vec::new();
++                File::open(&file)
++                    .map_err(|_| "无法读取记录")?
++                    .take(MAX_STORE + 1)
++                    .read_to_end(&mut bytes)
++                    .map_err(|_| "无法读取记录")?;
++                if bytes.len() as u64 > MAX_STORE {
++                    return Err("记录超过大小限制".into());
++                }
++                let disk: Disk = serde_json::from_slice(&bytes).map_err(|_| "记录格式损坏")?;
++                if disk.version != 1 || disk.tasks.len() > 50 {
++                    return Err("记录版本或任务数量不受支持".into());
++                }
++                let mut tasks = disk.tasks;
++                for task in &mut tasks {
++                    validate(task)?;
++                    task.recover();
++                }
++                Ok(tasks)
++            })();
++            match read {
++                Ok(tasks) => Workspace { tasks, error: None },
++                Err(reason) => Workspace {
++                    tasks: vec![],
++                    error: Some(format!("{}，原文件已保留。当前操作暂存内存。", reason)),
++                },
++            }
++        } else {
++            Workspace::default()
++        };
++        Ok(Self {
++            directory,
++            data: Mutex::new(data),
++        })
++    }
++    pub fn workspace(&self) -> Workspace {
++        self.data.lock().unwrap().clone()
++    }
++    pub fn task(&self, id: &str) -> Option<Task> {
++        self.data
++            .lock()
++            .unwrap()
++            .tasks
++            .iter()
++            .find(|t| t.id == id && t.provider == "codex")
++            .cloned()
++    }
++    pub fn save_task(&self, task: Task) -> Result<(), String> {
++        let mut data = self.data.lock().unwrap();
++        if let Some(old) = data.tasks.iter_mut().find(|t| t.id == task.id) {
++            if task.revision < old.revision {
++                return Ok(());
++            }
++            *old = task;
++        } else {
++            data.tasks.insert(0, task);
++        }
++        data.tasks.truncate(50);
++        self.persist(&data)
++    }
++    pub fn save_demo(&self, tasks: Vec<Task>) -> Result<(), String> {
++        if tasks.len() > 50 {
++            return Err("最多保留 50 个任务".into());
++        }
++        for task in &tasks {
++            validate(task)?;
++            if task.provider != "demo" {
++                return Err("前端不能覆盖真实任务".into());
++            }
++        }
++        let mut data = self.data.lock().unwrap();
++        let real: Vec<_> = data
++            .tasks
++            .iter()
++            .filter(|t| t.provider == "codex")
++            .cloned()
++            .collect();
++        if tasks.iter().any(|t| real.iter().any(|r| r.id == t.id)) {
++            return Err("演示任务 ID 与真实任务冲突".into());
++        }
++        data.tasks = real.into_iter().chain(tasks).take(50).collect();
++        self.persist(&data)
++    }
++    pub fn export_artifact(&self, id: &str) -> Result<String, String> {
++        let data = self.data.lock().unwrap();
++        let artifact = data
++            .tasks
++            .iter()
++            .flat_map(|t| &t.artifacts)
++            .find(|a| a.id == id)
++            .ok_or("交付物未保存，请稍后再试")?;
++        if artifact.content.len() > 256000 {
++            return Err("交付物超出导出大小限制".into());
++        }
++        let directory = self.directory.join("exports");
++        fs::create_dir_all(&directory).map_err(|_| "无法创建导出目录".to_string())?;
++        let root = self
++            .directory
++            .canonicalize()
++            .map_err(|_| "无法解析本地目录".to_string())?;
++        let directory = directory
++            .canonicalize()
++            .map_err(|_| "无法解析导出目录".to_string())?;
++        if !directory.starts_with(root) {
++            return Err("导出目录位于工作台目录之外".into());
++        }
++        let name: String = artifact
++            .name
++            .chars()
++            .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
++            .take(80)
++            .collect();
++        let name = if name.ends_with(".md") || name.ends_with(".txt") {
++            name
++        } else {
++            "artifact.txt".into()
++        };
++        let destination = directory.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
++        let mut file = fs::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .open(&destination)
++            .map_err(|_| "无法保存交付文件".to_string())?;
++        file.write_all(artifact.content.as_bytes())
++            .and_then(|_| file.sync_all())
++            .map_err(|_| "交付文件写入失败".to_string())?;
++        Ok(destination.display().to_string())
++    }
++    fn persist(&self, data: &Workspace) -> Result<(), String> {
++        if data.error.is_some() {
++            return Err("原记录无法读取，已禁止覆盖；当前操作暂存内存".into());
++        }
++        let tasks = data
++            .tasks
++            .iter()
++            .cloned()
++            .map(|mut task| {
++                if task.provider == "codex" {
++                    task.approvals.clear();
++                }
++                task
++            })
++            .collect();
++        let bytes = serde_json::to_vec(&Disk { version: 1, tasks })
++            .map_err(|_| "无法编码记录".to_string())?;
++        if bytes.len() as u64 > MAX_STORE {
++            return Err("记录超过 8 MiB，原文件保留".into());
++        }
++        let temporary = self.directory.join("workspace.tmp");
++        let destination = self.directory.join("workspace.json");
++        let mut file = File::create(&temporary).map_err(|_| "无法写入临时记录".to_string())?;
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            file.set_permissions(fs::Permissions::from_mode(0o600))
++                .map_err(|_| "无法设置记录权限".to_string())?;
++        }
++        file.write_all(&bytes)
++            .and_then(|_| file.sync_all())
++            .map_err(|_| "记录写入失败，原文件保留".to_string())?;
++        fs::rename(temporary, destination).map_err(|_| "记录替换失败，原文件保留".to_string())
++    }
++}
++fn validate(task: &Task) -> Result<(), String> {
++    if !matches!(task.provider.as_str(), "demo" | "codex")
++        || !matches!(task.scene.as_str(), "research" | "coding" | "writing")
++        || !matches!(
++            task.status.as_str(),
++            "queued"
++                | "running"
++                | "approval"
++                | "cancelling"
++                | "completed"
++                | "failed"
++                | "interrupted"
++                | "unknown"
++        )
++        || task.id.len() > 100
++        || task.title.len() > 500
++        || task.prompt.len() > 48000
++        || task.nodes.len() > 64
++        || task.events.len() > 100
++        || task.artifacts.len() > 10
++    {
++        return Err("任务记录超出允许范围".into());
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn directory() -> PathBuf {
++        std::env::temp_dir().join(format!("orbit-store-test-{}", uuid::Uuid::new_v4()))
++    }
++    #[test]
++    fn late_snapshot_cannot_replace_newer_state_and_restart_marks_unknown() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = Task::new("T".into(), "P".into(), "research".into());
++        task.revision = 8;
++        store.save_task(task.clone()).unwrap();
++        let mut old = task.clone();
++        old.revision = 2;
++        old.status = "queued".into();
++        store.save_task(old).unwrap();
++        assert_eq!(store.task(&task.id).unwrap().revision, 8);
++        drop(store);
++        let restored = Store::open(directory.clone()).unwrap();
++        assert_eq!(restored.task(&task.id).unwrap().status, "unknown");
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn corrupt_snapshot_is_preserved_and_cannot_be_overwritten() {
++        let directory = directory();
++        fs::create_dir_all(&directory).unwrap();
++        fs::write(directory.join("workspace.json"), "broken").unwrap();
++        let store = Store::open(directory.clone()).unwrap();
++        assert!(store.workspace().error.is_some());
++        assert!(store.save_demo(vec![]).is_err());
++        assert_eq!(
++            fs::read_to_string(directory.join("workspace.json")).unwrap(),
++            "broken"
++        );
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn demo_cannot_overwrite_real_and_export_uses_owned_text() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = Task::new("T".into(), "P".into(), "research".into());
++        task.artifacts.push(crate::model::Artifact {
++            id: "result".into(),
++            name: "../../report.md".into(),
++            kind: "markdown".into(),
++            content: "safe text".into(),
++            created_at: 0,
++        });
++        store.save_task(task.clone()).unwrap();
++        let mut fake = task;
++        fake.provider = "demo".into();
++        assert!(store.save_demo(vec![fake]).is_err());
++        let path = PathBuf::from(store.export_artifact("result").unwrap());
++        assert!(path.starts_with(directory.join("exports").canonicalize().unwrap()));
++        assert_eq!(fs::read_to_string(path).unwrap(), "safe text");
++        fs::remove_dir_all(directory).unwrap();
++    }
++}
+--- /dev/null
++++ b/src-tauri/src/runner.rs
+@@ -0,0 +1,1049 @@
++use crate::{
++    model::{now, Approval, Task},
++    protocol::{project, read_message},
++    store::Store,
++};
++use serde::Serialize;
++use serde_json::{json, Value};
++use std::{
++    collections::HashMap,
++    io::{BufReader, Read, Write},
++    path::PathBuf,
++    process::{Child, ChildStdin, Command, Stdio},
++    sync::{mpsc, Arc, Mutex},
++    thread,
++    time::{Duration, Instant},
++};
++use tauri::{AppHandle, Emitter};
++
++struct Run {
++    task: Task,
++    child: OwnedChild,
++    input: ChildStdin,
++    pending: HashMap<String, Value>,
++    controls: HashMap<u64, String>,
++    next_id: u64,
++    closed: bool,
++    last_emit: Instant,
++}
++
++impl Run {
++    fn idle(&self) -> bool {
++        self.closed && self.child.stopped
++    }
++    fn reject_control(&mut self, id: u64) -> bool {
++        let Some(label) = self.controls.remove(&id) else {
++            return false;
++        };
++        self.task.event(
++            &format!("{}请求被执行器拒绝；继续等待任务状态", label),
++            "error",
++            "工作台",
++        );
++        true
++    }
++    fn answer(
++        &mut self,
++        run_id: &str,
++        approval_id: &str,
++        answers: HashMap<String, String>,
++    ) -> Result<Value, String> {
++        if self.closed || self.task.status != "approval" {
++            return Err("此请求已失效".into());
++        }
++        let a = self
++            .task
++            .approvals
++            .iter()
++            .find(|a| {
++                a.id == approval_id
++                    && a.run_id == run_id
++                    && Some(a.turn_id.as_str()) == self.task.turn_id.as_deref()
++            })
++            .cloned()
++            .ok_or("此审批已失效或已处理")?;
++        let request = self
++            .pending
++            .get(approval_id)
++            .cloned()
++            .ok_or("请求已被处理")?;
++        if request["id"].to_string() != a.request_id {
++            return Err("请求 ID 不匹配".into());
++        }
++        if answers.len() != a.question_ids.len()
++            || a.question_ids.iter().any(|key| {
++                answers
++                    .get(key)
++                    .is_none_or(|answer| answer.trim().is_empty() || answer.chars().count() > 2000)
++            })
++        {
++            return Err("请为每个问题填写 1–2000 字的答复".into());
++        }
++        self.pending.remove(approval_id);
++        self.task.approvals.retain(|item| item.id != approval_id);
++        let answers: serde_json::Map<String, Value> = answers
++            .into_iter()
++            .map(|(key, answer)| (key, json!({"answers":[answer.trim()]})))
++            .collect();
++        Ok(json!({"id":request["id"],"result":{"answers":answers}}))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[cfg(unix)]
++    fn group_fixture(leader_exits: bool) -> (OwnedChild, i32) {
++        use std::io::BufRead;
++        use std::os::unix::process::CommandExt;
++        let script = if leader_exits {
++            "sh -c 'trap \"\" TERM; exec sleep 30' & echo $!; exit 0"
++        } else {
++            "trap '' TERM; sh -c 'trap \"\" TERM; exec sleep 30' & echo $!; wait"
++        };
++        let mut child = OwnedChild::new(
++            Command::new("/bin/sh")
++                .arg("-c")
++                .arg(script)
++                .stdout(Stdio::piped())
++                .process_group(0)
++                .spawn()
++                .unwrap(),
++        );
++        let mut line = String::new();
++        BufReader::new(child.child.stdout.take().unwrap())
++            .read_line(&mut line)
++            .unwrap();
++        thread::sleep(Duration::from_millis(100));
++        (child, line.trim().parse().unwrap())
++    }
++    #[cfg(unix)]
++    fn descendant_running(pid: i32) -> bool {
++        let output = Command::new("/bin/ps")
++            .args(["-o", "stat=", "-p", &pid.to_string()])
++            .output()
++            .unwrap();
++        let state = String::from_utf8_lossy(&output.stdout);
++        !state.trim().is_empty() && !state.trim().starts_with('Z')
++    }
++    #[cfg(unix)]
++    fn check_group_cleanup(leader_exits: bool) {
++        let (mut child, descendant) = group_fixture(leader_exits);
++        stop_child(&mut child);
++        let deadline = Instant::now() + Duration::from_secs(2);
++        while descendant_running(descendant) && Instant::now() < deadline {
++            thread::sleep(Duration::from_millis(20));
++        }
++        let leaked = descendant_running(descendant);
++        assert!(
++            !leaked,
++            "owned descendant must be stopped, including after leader exit"
++        );
++    }
++    #[test]
++    #[cfg(unix)]
++    fn cleanup_after_leader_exit() {
++        check_group_cleanup(true);
++    }
++    #[test]
++    #[cfg(unix)]
++    fn cleanup_descendant_ignoring_term() {
++        check_group_cleanup(false);
++    }
++    fn fake_run() -> Run {
++        use std::os::unix::process::CommandExt;
++        let mut child = OwnedChild::new(
++            Command::new("/bin/cat")
++                .stdin(Stdio::piped())
++                .stdout(Stdio::null())
++                .process_group(0)
++                .spawn()
++                .unwrap(),
++        );
++        let input = child.child.stdin.take().unwrap();
++        let mut task = Task::new("test".into(), "test".into(), "research".into());
++        task.run_id = Some("run".into());
++        task.thread_id = Some("thread".into());
++        task.turn_id = Some("turn".into());
++        task.status = "running".into();
++        Run {
++            task,
++            child,
++            input,
++            pending: HashMap::new(),
++            controls: HashMap::new(),
++            next_id: 100,
++            closed: false,
++            last_emit: Instant::now(),
++        }
++    }
++    #[test]
++    #[cfg(unix)]
++    fn control_rejection_keeps_root_open_for_real_completion() {
++        let mut run = fake_run();
++        run.controls.insert(100, "补充方向".into());
++        assert!(run.reject_control(100));
++        assert!(!run.closed);
++        assert_eq!(run.task.status, "running");
++        assert!(!run.reject_control(1));
++        assert!(project(
++            &mut run.task,
++            &json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}})
++        ));
++        assert_eq!(run.task.status, "completed");
++    }
++    #[test]
++    #[cfg(unix)]
++    fn backend_answer_is_consumed_once_and_invalid_after_cancel() {
++        let mut run = fake_run();
++        let approval = Approval {
++            id: "approval".into(),
++            request_id: "42".into(),
++            run_id: "run".into(),
++            turn_id: "turn".into(),
++            title: "input".into(),
++            description: "".into(),
++            kind: "input".into(),
++            question_ids: vec!["scope".into()],
++        };
++        run.task.status = "approval".into();
++        run.task.approvals.push(approval.clone());
++        run.pending.insert("approval".into(), json!({"id":42}));
++        let answers = HashMap::from([("scope".into(), "yes".into())]);
++        let response = run.answer("run", "approval", answers.clone()).unwrap();
++        assert_eq!(response["id"], 42);
++        assert_eq!(response["result"]["answers"]["scope"]["answers"][0], "yes");
++        assert!(run.answer("run", "approval", answers.clone()).is_err());
++        run.task.approvals.push(approval);
++        run.pending.insert("approval".into(), json!({"id":42}));
++        run.task.status = "cancelling".into();
++        run.pending.clear();
++        run.task.approvals.clear();
++        assert!(run.answer("run", "approval", answers).is_err());
++    }
++    #[test]
++    #[cfg(unix)]
++    fn shutdown_waits_for_registration_and_rejects_later_starts() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-lifecycle-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let guard = runtime.begin_start().unwrap();
++        let other = runtime.clone();
++        let barrier = Arc::new(std::sync::Barrier::new(2));
++        let ready = barrier.clone();
++        let (done, finished) = mpsc::channel();
++        let shutdown = thread::spawn(move || {
++            ready.wait();
++            other.shutdown();
++            done.send(()).unwrap();
++        });
++        barrier.wait();
++        assert!(finished.recv_timeout(Duration::from_millis(30)).is_err());
++        let run = Arc::new(Mutex::new(fake_run()));
++        runtime
++            .runs
++            .lock()
++            .unwrap()
++            .insert("run".into(), run.clone());
++        drop(guard);
++        finished.recv_timeout(Duration::from_secs(3)).unwrap();
++        shutdown.join().unwrap();
++        assert!(run.lock().unwrap().closed);
++        assert!(run.lock().unwrap().child.stopped);
++        assert!(runtime.begin_start().is_err());
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[cfg(unix)]
++    fn cleanup_error_after_leader_exit_never_signals_reused_group() {
++        use std::os::unix::process::CommandExt;
++        let child = Command::new("/bin/sh")
++            .args(["-c", "exit 0"])
++            .process_group(0)
++            .spawn()
++            .unwrap();
++        let mut owned = OwnedChild::new(child);
++        thread::sleep(Duration::from_millis(100));
++        assert!(owned
++            .stop_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
++            .is_err());
++        assert!(owned.reaped);
++        assert!(!owned.stopped);
++        assert!(owned
++            .stop_with(|_| panic!("must not signal a reaped leader's group"))
++            .is_err());
++    }
++    #[test]
++    #[cfg(unix)]
++    fn closed_run_with_live_uncleaned_leader_cannot_admit_new_root() {
++        let mut run = fake_run();
++        run.closed = true;
++        assert!(run
++            .child
++            .stop_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
++            .is_err());
++        assert!(!run.child.reaped);
++        assert!(!run.idle());
++        run.child.stop().unwrap();
++        assert!(run.idle());
++    }
++    #[test]
++    #[cfg(unix)]
++    fn runtime_preserves_uncertain_cleanup_and_rejects_new_root() {
++        use std::os::unix::process::CommandExt;
++        let directory =
++            std::env::temp_dir().join(format!("orbit-uncertain-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let mut run = fake_run();
++        run.child.stop().unwrap();
++        run.child = OwnedChild::new(
++            Command::new("/bin/sh")
++                .args(["-c", "exit 0"])
++                .process_group(0)
++                .spawn()
++                .unwrap(),
++        );
++        thread::sleep(Duration::from_millis(100));
++        assert!(run
++            .child
++            .stop_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
++            .is_err());
++        run.closed = true;
++        runtime
++            .runs
++            .lock()
++            .unwrap()
++            .insert("run".into(), Arc::new(Mutex::new(run)));
++        assert!(runtime.ensure_idle().is_err());
++        assert_eq!(runtime.runs.lock().unwrap().len(), 1);
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[ignore = "requires local Codex CLI; initialize only, no model calls"]
++    fn local_initialize_without_model_calls() {
++        let result = doctor();
++        assert!(result.available, "{}", result.message);
++        assert!(result.initialized, "{}", result.message);
++        println!("{}", result.version);
++    }
++}
++#[derive(Clone)]
++pub struct Runtime {
++    pub store: Arc<Store>,
++    runs: Arc<Mutex<HashMap<String, Arc<Mutex<Run>>>>>,
++    starting: Arc<Mutex<bool>>,
++}
++
++#[derive(Serialize)]
++pub struct Doctor {
++    available: bool,
++    initialized: bool,
++    path: String,
++    version: String,
++    message: String,
++}
++
++fn cli_path() -> PathBuf {
++    let home = std::env::var_os("HOME")
++        .map(PathBuf::from)
++        .unwrap_or_default();
++    for path in [
++        home.join(".local/bin/codex"),
++        home.join(".cargo/bin/codex"),
++        PathBuf::from("/opt/homebrew/bin/codex"),
++        PathBuf::from("/usr/local/bin/codex"),
++    ] {
++        if path.is_file() {
++            return path;
++        }
++    }
++    PathBuf::from("codex")
++}
++fn command() -> Command {
++    let mut c = Command::new(cli_path());
++    c.arg("app-server")
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
++    #[cfg(unix)]
++    {
++        use std::os::unix::process::CommandExt;
++        c.process_group(0);
++    }
++    c
++}
++// The leader is never reaped until its owned group is cleaned. This keeps the
++// PGID reserved, including when the leader exits before its descendants.
++struct OwnedChild {
++    child: Child,
++    stopped: bool,
++    reaped: bool,
++    group_killed: bool,
++    stop_error: Option<String>,
++}
++impl OwnedChild {
++    fn new(child: Child) -> Self {
++        Self {
++            child,
++            stopped: false,
++            reaped: false,
++            group_killed: false,
++            stop_error: None,
++        }
++    }
++    fn stop(&mut self) -> Result<(), String> {
++        self.stop_with(|pid| {
++            #[cfg(unix)]
++            {
++                // Immediate forced cleanup is intentional; user cancellation first
++                // goes through turn/interrupt and awaits provider confirmation.
++                if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == 0 {
++                    Ok(())
++                } else {
++                    Err(std::io::Error::last_os_error())
++                }
++            }
++            #[cfg(not(unix))]
++            {
++                let _ = pid;
++                Ok(())
++            }
++        })
++    }
++    fn stop_with(&mut self, signal: impl FnOnce(u32) -> std::io::Result<()>) -> Result<(), String> {
++        if self.reaped {
++            return self.stop_error.clone().map_or(Ok(()), Err);
++        }
++        if !self.group_killed {
++            if let Err(error) = signal(self.child.id()) {
++                // Reaping disables future group signals, even when cleanup remains
++                // unconfirmed. macOS can return EPERM for an exited zombie group.
++                if matches!(self.child.try_wait(), Ok(Some(_))) {
++                    self.reaped = true;
++                }
++                let message = format!("owned group cleanup unconfirmed: {error:?}");
++                self.stop_error = Some(message.clone());
++                return Err(message);
++            }
++            self.group_killed = true;
++        }
++        #[cfg(not(unix))]
++        self.child
++            .kill()
++            .map_err(|error| format!("stop leader: {error:?}"))?;
++        self.child
++            .wait()
++            .map_err(|error| format!("reap leader: {error:?}"))?;
++        self.reaped = true;
++        self.stopped = true;
++        self.stop_error = None;
++        Ok(())
++    }
++}
++impl Drop for OwnedChild {
++    fn drop(&mut self) {
++        if let Err(error) = self.stop() {
++            eprintln!("Orbit: cleanup: {error}");
++        }
++    }
++}
++fn stop_child(child: &mut OwnedChild) {
++    if let Err(error) = child.stop() {
++        eprintln!("Orbit: cleanup: {error}");
++    }
++}
++fn send(input: &mut ChildStdin, message: &Value) -> Result<(), String> {
++    serde_json::to_writer(&mut *input, message).map_err(|_| "无法发送协议消息".to_string())?;
++    input
++        .write_all(b"\n")
++        .and_then(|_| input.flush())
++        .map_err(|_| "执行器连接已关闭".to_string())
++}
++fn initialize() -> Value {
++    json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"orbit-workbench","title":"Orbit","version":"0.1.0"},"capabilities":{"experimentalApi":false}}})
++}
++
++pub fn doctor() -> Doctor {
++    let path = cli_path().display().to_string();
++    let mut result = Doctor {
++        available: false,
++        initialized: false,
++        path,
++        version: String::new(),
++        message: "未找到可运行的 Codex CLI".into(),
++    };
++    // Check initialize only; no thread or inference is started.
++    let mut child = match command().spawn() {
++        Ok(c) => OwnedChild::new(c),
++        Err(_) => return result,
++    };
++    result.available = true;
++    let stderr = child.child.stderr.take().unwrap();
++    let capture = Arc::new(Mutex::new(String::new()));
++    let captured = capture.clone();
++    thread::spawn(move || {
++        let mut reader = stderr;
++        let mut bytes = [0; 1024];
++        while let Ok(n) = reader.read(&mut bytes) {
++            if n == 0 {
++                break;
++            }
++            let mut s = captured.lock().unwrap();
++            s.push_str(&String::from_utf8_lossy(&bytes[..n]));
++            if s.len() > 4096 {
++                *s = s
++                    .chars()
++                    .rev()
++                    .take(2048)
++                    .collect::<String>()
++                    .chars()
++                    .rev()
++                    .collect();
++            }
++        }
++    });
++    let output = child.child.stdout.take().unwrap();
++    let (tx, rx) = mpsc::channel();
++    thread::spawn(move || {
++        let _ = tx.send(read_message(&mut BufReader::new(output)));
++    });
++    let sent = send(child.child.stdin.as_mut().unwrap(), &initialize());
++    let response = if sent.is_ok() {
++        rx.recv_timeout(Duration::from_secs(8)).ok()
++    } else {
++        None
++    };
++    match response {
++        Some(Ok(Some(value))) if value["id"] == 1 && value.get("result").is_some() => {
++            result.initialized = true;
++            result.version = value["result"]["userAgent"]
++                .as_str()
++                .unwrap_or("版本未返回")
++                .to_string();
++            result.message = "初始化握手成功 · 未调用模型".into();
++        }
++        Some(Ok(Some(_))) => result.message = "执行器返回协议错误或不兼容响应".into(),
++        Some(Ok(None)) => result.message = "CLI 在初始化前退出，请检查本机状态目录与配置".into(),
++        Some(Err(error)) => result.message = error,
++        None => {
++            result.message = if sent.is_err() {
++                "无法向 CLI 发送初始化请求"
++            } else {
++                "初始化检查超时，已结束检查进程"
++            }
++            .into()
++        }
++    }
++    stop_child(&mut child);
++    if !result.initialized
++        && capture
++            .lock()
++            .unwrap()
++            .contains("failed to initialize sqlite state runtime")
++    {
++        result.message = "Codex 本地状态目录不可写，请在正常桌面环境运行".into();
++    }
++    result
++}
++
++impl Runtime {
++    pub fn new(store: Store) -> Self {
++        Self {
++            store: Arc::new(store),
++            runs: Arc::new(Mutex::new(HashMap::new())),
++            starting: Arc::new(Mutex::new(false)),
++        }
++    }
++    fn begin_start(&self) -> Result<std::sync::MutexGuard<'_, bool>, String> {
++        let guard = self.starting.lock().unwrap();
++        if *guard {
++            Err("工作台正在关闭，不能启动新任务".into())
++        } else {
++            Ok(guard)
++        }
++    }
++    fn ensure_idle(&self) -> Result<(), String> {
++        for run in self.runs.lock().unwrap().values() {
++            let mut r = run.lock().unwrap();
++            if !r.closed {
++                return Err("当前已有真实任务运行，请先结束或中断它".into());
++            }
++            let _ = r.child.stop();
++            if !r.idle() {
++                return Err("旧执行器清理未确认，请核对本机进程后重启工作台".into());
++            }
++        }
++        Ok(())
++    }
++    fn publish(&self, app: &AppHandle, task: Task) {
++        if let Err(message) = self.store.save_task(task.clone()) {
++            let _ = app.emit("runtime-warning", message);
++        }
++        let _ = app.emit("runtime-task", task);
++    }
++    pub fn create(&self, title: String, prompt: String, scene: String) -> Result<Task, String> {
++        if title.trim().is_empty()
++            || title.chars().count() > 100
++            || prompt.trim().is_empty()
++            || prompt.chars().count() > 12000
++            || !matches!(scene.as_str(), "research" | "coding" | "writing")
++        {
++            return Err("请提供有效的任务名称、目标与场景".into());
++        }
++        let mut task = Task::new(title.trim().into(), prompt.trim().into(), scene);
++        task.status = "queued".into();
++        task.started_at = None;
++        task.run_id = None;
++        task.revision = 0;
++        self.store.save_task(task.clone())?;
++        Ok(task)
++    }
++    pub fn start(&self, app: AppHandle, task_id: String) -> Result<Task, String> {
++        let _guard = self.begin_start()?;
++        self.ensure_idle()?;
++        let mut task = self.store.task(&task_id).ok_or("任务不存在，请重新创建")?;
++        for old in self.runs.lock().unwrap().values() {
++            let old = old.lock().unwrap();
++            if old.task.id == task_id && old.task.revision > task.revision {
++                task = old.task.clone();
++            }
++        }
++        task.status = "running".into();
++        task.started_at = Some(now());
++        task.finished_at = None;
++        task.run_id = Some(uuid::Uuid::new_v4().to_string());
++        task.thread_id = None;
++        task.turn_id = None;
++        task.nodes.clear();
++        task.approvals.clear();
++        task.artifacts.clear();
++        task.tokens = None;
++        task.revision += 1;
++        task.event("正在连接本机 Codex；文件沙箱只读", "system", "工作台");
++        let run_id = task.run_id.clone().unwrap();
++        let directory = self.store.directory.join("runs").join(&run_id);
++        std::fs::create_dir_all(&directory).map_err(|_| "无法创建任务目录".to_string())?;
++        let mut child = OwnedChild::new(
++            command()
++                .current_dir(&directory)
++                .spawn()
++                .map_err(|_| "无法启动 Codex，请先在执行器设置中检查连接".to_string())?,
++        );
++        let input = child.child.stdin.take().unwrap();
++        let output = child.child.stdout.take().unwrap();
++        let mut stderr = child.child.stderr.take().unwrap();
++        thread::spawn(move || {
++            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
++        });
++        let run = Arc::new(Mutex::new(Run {
++            task: task.clone(),
++            child,
++            input,
++            pending: HashMap::new(),
++            controls: HashMap::new(),
++            next_id: 100,
++            closed: false,
++            last_emit: Instant::now(),
++        }));
++        {
++            let mut runs = self.runs.lock().unwrap();
++            runs.retain(|_, r| !r.lock().unwrap().closed);
++            runs.insert(run_id.clone(), run.clone());
++        }
++        let sent = {
++            let mut r = run.lock().unwrap();
++            send(&mut r.input, &initialize())
++        };
++        if let Err(error) = sent {
++            self.fail(&app, &run, &error, "failed");
++            return Ok(run.lock().unwrap().task.clone());
++        }
++        self.publish(&app, task.clone());
++        let runtime = self.clone();
++        let reader_run = run.clone();
++        let reader_app = app.clone();
++        thread::spawn(move || {
++            let mut reader = BufReader::new(output);
++            loop {
++                match read_message(&mut reader) {
++                    Ok(Some(message)) => {
++                        if !runtime.receive(&reader_app, &reader_run, message, &directory) {
++                            break;
++                        }
++                    }
++                    Ok(None) => {
++                        runtime.fail(
++                            &reader_app,
++                            &reader_run,
++                            "执行器连接结束，在途结果需核对",
++                            "unknown",
++                        );
++                        break;
++                    }
++                    Err(error) => {
++                        runtime.fail(&reader_app, &reader_run, &error, "unknown");
++                        break;
++                    }
++                }
++            }
++            let mut run = reader_run.lock().unwrap();
++            stop_child(&mut run.child);
++        });
++        let timeout_runtime = self.clone();
++        let timeout_run = run.clone();
++        thread::spawn(move || {
++            thread::sleep(Duration::from_secs(25));
++            timeout_runtime.fail_if(
++                &app,
++                &timeout_run,
++                "启动超时，任务结果需核对",
++                "unknown",
++                |r| r.task.turn_id.is_none(),
++            );
++        });
++        Ok(task)
++    }
++    fn fail(&self, app: &AppHandle, run: &Arc<Mutex<Run>>, message: &str, status: &str) {
++        self.fail_if(app, run, message, status, |_| true);
++    }
++    fn fail_if(
++        &self,
++        app: &AppHandle,
++        run: &Arc<Mutex<Run>>,
++        message: &str,
++        status: &str,
++        condition: impl FnOnce(&Run) -> bool,
++    ) {
++        let snapshot = {
++            let mut r = run.lock().unwrap();
++            if r.closed || r.task.terminal() || !condition(&r) {
++                return;
++            }
++            r.closed = true;
++            r.task.status = status.into();
++            r.task.finished_at = Some(now());
++            r.task.approvals.clear();
++            r.pending.clear();
++            for n in &mut r.task.nodes {
++                if matches!(n.status.as_str(), "running" | "approval" | "queued") {
++                    n.status = "unknown".into();
++                }
++            }
++            r.task.event(message, "error", "工作台");
++            if r.child.stop().is_err() {
++                r.task.event(
++                    "拥有的进程组清理未确认；暂停新任务，请核对本机执行器",
++                    "error",
++                    "工作台",
++                );
++            }
++            r.task.clone()
++        };
++        self.publish(app, snapshot);
++    }
++    fn receive(
++        &self,
++        app: &AppHandle,
++        run: &Arc<Mutex<Run>>,
++        message: Value,
++        directory: &std::path::Path,
++    ) -> bool {
++        let mut r = run.lock().unwrap();
++        if r.closed {
++            return false;
++        }
++        let mut changed = false;
++        if message.get("method").is_some() && message.get("id").is_some() {
++            let method = message["method"].as_str().unwrap_or("");
++            let id = message["id"].clone();
++            let params = &message["params"];
++            if method == "item/tool/requestUserInput"
++                && params["threadId"].as_str() == r.task.thread_id.as_deref()
++                && params["turnId"].as_str() == r.task.turn_id.as_deref()
++                && r.task.status != "cancelling"
++                && r.pending.len() < 16
++            {
++                let key = id.to_string();
++                let approval_id = format!("{}:{}", r.task.run_id.as_deref().unwrap(), key);
++                if r.pending.contains_key(&approval_id) {
++                    return true;
++                }
++                let questions = params["questions"].as_array().cloned().unwrap_or_default();
++                let description = questions
++                    .iter()
++                    .filter_map(|q| q["question"].as_str())
++                    .collect::<Vec<_>>()
++                    .join("\n");
++                let approval = Approval {
++                    id: approval_id.clone(),
++                    request_id: key,
++                    run_id: r.task.run_id.clone().unwrap(),
++                    turn_id: r.task.turn_id.clone().unwrap(),
++                    title: "Codex 需要补充信息".into(),
++                    description: description.chars().take(2000).collect(),
++                    kind: "input".into(),
++                    question_ids: questions
++                        .iter()
++                        .filter_map(|q| q["id"].as_str().map(String::from))
++                        .collect(),
++                };
++                r.pending.insert(approval_id, message.clone());
++                r.task.approvals.push(approval);
++                r.task.status = "approval".into();
++                r.task.event("收到补充信息请求", "approval", "Codex");
++                changed = true;
++            } else {
++                let response = match method {
++                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
++                        json!({"id":id,"result":{"decision":"decline"}})
++                    }
++                    _ => {
++                        json!({"id":id,"error":{"code":-32601,"message":"Unsupported request in Orbit read-only prototype"}})
++                    }
++                };
++                if send(&mut r.input, &response).is_err() {
++                    drop(r);
++                    self.fail(app, run, "权限响应发送失败，结果需核对", "unknown");
++                    return false;
++                }
++                r.task.event(
++                    "只读原型已拒绝权限提升或不支持的工具请求",
++                    "approval",
++                    "工作台",
++                );
++                changed = true;
++            }
++        } else if message.get("id").is_some() {
++            let id = message["id"].as_u64().unwrap_or(0);
++            if message.get("error").is_some() {
++                if r.reject_control(id) {
++                    let snapshot = r.task.clone();
++                    drop(r);
++                    self.publish(app, snapshot);
++                    return true;
++                }
++                let label = "初始化或启动";
++                drop(r);
++                self.fail(
++                    app,
++                    run,
++                    &format!("{}请求被执行器拒绝，请检查 CLI 配置与权限", label),
++                    "failed",
++                );
++                return false;
++            }
++            let request = match id {
++                1 => {
++                    if send(&mut r.input, &json!({"method":"initialized"})).is_err() {
++                        drop(r);
++                        self.fail(app, run, "初始化通知发送失败", "failed");
++                        return false;
++                    }
++                    Some(
++                        json!({"id":2,"method":"thread/start","params":{"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。将最终交付直接写在回答中。","ephemeral":false}}),
++                    )
++                }
++                2 => {
++                    let thread = &message["result"]["thread"];
++                    let Some(id) = thread["id"].as_str() else {
++                        drop(r);
++                        self.fail(app, run, "执行器未返回有效 thread ID", "failed");
++                        return false;
++                    };
++                    r.task.thread_id = Some(id.into());
++                    r.task.root_node();
++                    r.task.event("会话已创建，启动任务", "system", "工作台");
++                    changed = true;
++                    Some(
++                        json!({"id":3,"method":"turn/start","params":{"threadId":id,"input":[{"type":"text","text":r.task.prompt}]}}),
++                    )
++                }
++                3 => {
++                    if let Some(id) = message["result"]["turn"]["id"].as_str() {
++                        r.task.turn_id = Some(id.into());
++                        r.task.revision += 1;
++                        changed = true;
++                    } else {
++                        drop(r);
++                        self.fail(app, run, "执行器未返回有效 turn ID", "failed");
++                        return false;
++                    }
++                    None
++                }
++                _ => {
++                    if let Some(kind) = r.controls.remove(&id) {
++                        r.task.event(
++                            &format!("{}请求已接收；执行结果以状态事件为准", kind),
++                            "system",
++                            "工作台",
++                        );
++                        changed = true;
++                    }
++                    None
++                }
++            };
++            if let Some(request) = request {
++                if send(&mut r.input, &request).is_err() {
++                    drop(r);
++                    self.fail(app, run, "无法启动执行器任务", "failed");
++                    return false;
++                }
++            }
++        } else {
++            changed = project(&mut r.task, &message);
++            if message["method"] == "serverRequest/resolved" {
++                let request_id = message["params"]["requestId"].to_string();
++                r.pending.retain(|_, m| m["id"].to_string() != request_id);
++            }
++        }
++        let terminal = r.task.terminal();
++        if terminal {
++            r.closed = true;
++            r.pending.clear();
++            if r.child.stop().is_err() {
++                r.task.event(
++                    "执行结果已确认；拥有的进程组清理未确认，请核对本机执行器",
++                    "error",
++                    "工作台",
++                );
++            }
++        }
++        let delta = message["method"] == "item/agentMessage/delta";
++        let should_emit = changed && (!delta || r.last_emit.elapsed() > Duration::from_millis(180));
++        if should_emit {
++            r.last_emit = Instant::now();
++            let snapshot = r.task.clone();
++            drop(r);
++            self.publish(app, snapshot);
++        }
++        !terminal
++    }
++    fn run(&self, id: &str) -> Result<Arc<Mutex<Run>>, String> {
++        self.runs
++            .lock()
++            .unwrap()
++            .get(id)
++            .cloned()
++            .ok_or_else(|| "运行已失效，请核对状态".into())
++    }
++    pub fn steer(&self, app: &AppHandle, id: String, text: String) -> Result<(), String> {
++        if text.trim().is_empty() || text.chars().count() > 2000 {
++            return Err("补充方向应为 1–2000 字".into());
++        }
++        let run = self.run(&id)?;
++        let mut r = run.lock().unwrap();
++        if r.closed || r.task.status == "cancelling" {
++            return Err("运行已结束或正在中断".into());
++        }
++        let turn = r.task.turn_id.clone().ok_or("任务尚未开始，请稍后再试")?;
++        let thread = r.task.thread_id.clone().ok_or("会话未创建")?;
++        let request_id = r.next_id;
++        r.next_id += 1;
++        send(
++            &mut r.input,
++            &json!({"id":request_id,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":text.trim()}]}}),
++        )?;
++        r.controls.insert(request_id, "补充方向".into());
++        r.task
++            .event("已发送补充方向，等待执行器确认", "input", "你");
++        let task = r.task.clone();
++        drop(r);
++        self.publish(app, task);
++        Ok(())
++    }
++    pub fn interrupt(&self, app: AppHandle, id: String) -> Result<(), String> {
++        let run = self.run(&id)?;
++        let mut r = run.lock().unwrap();
++        if r.closed {
++            return Err("运行已结束".into());
++        }
++        if r.task.status == "cancelling" {
++            return Ok(());
++        }
++        let Some(turn) = r.task.turn_id.clone() else {
++            drop(r);
++            self.fail(
++                &app,
++                &run,
++                "已结束启动进程；尚未确认是否存在外部执行",
++                "unknown",
++            );
++            return Ok(());
++        };
++        let thread = r.task.thread_id.clone().ok_or("会话未创建")?;
++        let request_id = r.next_id;
++        r.next_id += 1;
++        send(
++            &mut r.input,
++            &json!({"id":request_id,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}),
++        )?;
++        r.controls.insert(request_id, "中断".into());
++        r.task.status = "cancelling".into();
++        r.task.approvals.clear();
++        r.pending.clear();
++        r.task
++            .event("已请求中断，等待执行器确认", "system", "工作台");
++        let task = r.task.clone();
++        drop(r);
++        self.publish(&app, task);
++        let runtime = self.clone();
++        thread::spawn(move || {
++            thread::sleep(Duration::from_secs(10));
++            runtime.fail_if(
++                &app,
++                &run,
++                "中断确认超时；已尝试停止拥有的执行器，结果与清理范围需核对",
++                "unknown",
++                |r| r.task.status == "cancelling",
++            );
++        });
++        Ok(())
++    }
++    pub fn reply(
++        &self,
++        app: &AppHandle,
++        id: String,
++        approval_id: String,
++        answers: HashMap<String, String>,
++    ) -> Result<(), String> {
++        let run = self.run(&id)?;
++        let mut r = run.lock().unwrap();
++        let response = r.answer(&id, &approval_id, answers)?;
++        if send(&mut r.input, &response).is_err() {
++            drop(r);
++            self.fail(app, &run, "答复发送结果未知，请勿重复批准", "unknown");
++            return Err("答复发送结果未知".into());
++        }
++        if r.task.approvals.is_empty() {
++            r.task.status = "running".into();
++        }
++        r.task.event("信息答复已发送", "approval", "你");
++        let task = r.task.clone();
++        drop(r);
++        self.publish(app, task);
++        Ok(())
++    }
++    pub fn shutdown(&self) {
++        let mut lifecycle = self.starting.lock().unwrap();
++        *lifecycle = true;
++        for run in self.runs.lock().unwrap().values() {
++            let mut r = run.lock().unwrap();
++            if !r.closed {
++                r.closed = true;
++                r.task.status = "unknown".into();
++                r.task.approvals.clear();
++                r.pending.clear();
++                r.task
++                    .event("App 已关闭，在途结果需核对", "system", "工作台");
++            }
++            if r.child.stop().is_err() {
++                r.task.event(
++                    "拥有的进程组清理未确认，请核对本机执行器",
++                    "error",
++                    "工作台",
++                );
++            }
++            let _ = self.store.save_task(r.task.clone());
++        }
++    }
++}
+--- /dev/null
++++ b/src-tauri/src/main.rs
+@@ -0,0 +1,4 @@
++#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
++fn main() {
++    orbit_workbench_lib::run()
++}
+--- /dev/null
++++ b/src-tauri/src/model.rs
+@@ -0,0 +1,147 @@
++use serde::{Deserialize, Serialize};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++pub fn now() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis() as u64
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Node {
++    pub id: String,
++    pub name: String,
++    pub role: String,
++    pub model: String,
++    pub status: String,
++    pub summary: String,
++    pub output: String,
++    pub parent_id: Option<String>,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Activity {
++    pub id: String,
++    pub at: u64,
++    pub kind: String,
++    pub agent: String,
++    pub text: String,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Approval {
++    pub id: String,
++    pub request_id: String,
++    pub run_id: String,
++    pub turn_id: String,
++    pub title: String,
++    pub description: String,
++    pub kind: String,
++    pub question_ids: Vec<String>,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Artifact {
++    pub id: String,
++    pub name: String,
++    pub kind: String,
++    pub content: String,
++    pub created_at: u64,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Task {
++    pub id: String,
++    pub title: String,
++    pub prompt: String,
++    pub scene: String,
++    pub provider: String,
++    pub status: String,
++    pub created_at: u64,
++    pub started_at: Option<u64>,
++    pub finished_at: Option<u64>,
++    pub run_id: Option<String>,
++    pub thread_id: Option<String>,
++    pub turn_id: Option<String>,
++    pub revision: u64,
++    pub phase: u32,
++    pub nodes: Vec<Node>,
++    pub events: Vec<Activity>,
++    pub approvals: Vec<Approval>,
++    pub artifacts: Vec<Artifact>,
++    pub tokens: Option<u64>,
++}
++impl Task {
++    pub fn new(title: String, prompt: String, scene: String) -> Self {
++        Self {
++            id: uuid::Uuid::new_v4().to_string(),
++            title,
++            prompt,
++            scene,
++            provider: "codex".into(),
++            status: "running".into(),
++            created_at: now(),
++            started_at: Some(now()),
++            finished_at: None,
++            run_id: Some(uuid::Uuid::new_v4().to_string()),
++            thread_id: None,
++            turn_id: None,
++            revision: 1,
++            phase: 0,
++            nodes: vec![],
++            events: vec![],
++            approvals: vec![],
++            artifacts: vec![],
++            tokens: None,
++        }
++    }
++    pub fn terminal(&self) -> bool {
++        matches!(self.status.as_str(), "completed" | "failed" | "interrupted")
++    }
++    pub fn recover(&mut self) {
++        if matches!(self.status.as_str(), "running" | "approval" | "cancelling") {
++            self.status = "unknown".into();
++            self.approvals.clear();
++            self.revision += 1;
++            for node in &mut self.nodes {
++                if matches!(node.status.as_str(), "running" | "approval" | "cancelling") {
++                    node.status = "unknown".into();
++                }
++            }
++        }
++    }
++    pub fn event(&mut self, text: &str, kind: &str, agent: &str) {
++        self.revision += 1;
++        self.events.push(Activity {
++            id: format!("{}-{}", self.id, self.revision),
++            at: now(),
++            kind: kind.into(),
++            agent: agent.into(),
++            text: text.chars().take(1500).collect(),
++        });
++        if self.events.len() > 100 {
++            self.events.remove(0);
++        }
++    }
++    pub fn root_node(&mut self) {
++        if let Some(id) = &self.thread_id {
++            if !self.nodes.iter().any(|n| &n.id == id) {
++                self.nodes.insert(
++                    0,
++                    Node {
++                        id: id.clone(),
++                        name: "Codex".into(),
++                        role: "主 Agent".into(),
++                        model: "CLI 默认模型".into(),
++                        status: "running".into(),
++                        summary: "正在执行你的任务".into(),
++                        output: String::new(),
++                        parent_id: None,
++                    },
++                );
++            }
++        }
++    }
++}

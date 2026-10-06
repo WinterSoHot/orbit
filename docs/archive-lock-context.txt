@@ -1,0 +1,195 @@
+    fn idle(&self) -> bool {
+        self.closed && self.child.stopped
+    }
+    fn reject_control(&mut self, 
+
+    fn begin_start(&self) -> Result<std::sync::MutexGuard<'_, bool>, String> {
+        let guard = self.starting.lock().unwrap();
+        if *guard {
+            Err("工作台正在关闭，不能启动新任务".into())
+        } else {
+            Ok(guard)
+        }
+    }
+
+
+    pub fn sync_agents(&self, task_id: String) -> Result<Task, String> {
+        let _lifecycle = self.begin_start()?;
+        self.ensure_idle()?;
+        let task = self.store.task(&task_id).ok_or("真实任务不存在")?;
+        if !task.terminal() {
+            return Err("请等任务结束后再同步协作记录".into());
+        }
+        task.thread_id.as_deref().ok_or("任务没有 CLI 会话记录")?;
+        let run_id = task.run_id.as_deref().ok_or("任务没有运行标识")?;
+        let turn_id = task.turn_id.as_deref().ok_or("任务没有本轮标识")?;
+        let history = read_agent_history(&task, &self.inspections)?;
+        let matching = self.runs.lock().unwrap().get(run_id).cloned();
+        if let Some(run) = matching {
+            let mut r = run.lock().unwrap();
+            if !r.closed {
+                return Err("执行器仍在结束中，请稍后同步".into());
+            }
+            let saved = self
+                .store
+                .sync_agents(&task_id, run_id, turn_id, &history)?;
+            r.task = saved.clone();
+            Ok(saved)
+        } else {
+            self.store.sync_agents(&task_id, run_id, turn_id, &history)
+        }
+    }
+    pub fn edit_artifact(
+        &self,
+        id: String,
+        expected: String,
+        content: String,
+    ) -> Result<Task, String> {
+        let _lifecycle = self.begin_start()?;
+        let matching = self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .find(|run| {
+                run.lock()
+                    .unwrap()
+                    .task
+                    .artifacts
+                    .iter()
+                    .any(|a| a.id == id)
+            })
+            .cloned();
+        if let Some(run) = matching {
+            let mut r = run.lock().unwrap();
+            if !r.closed {
+                return Err("执行器仍在结束中，请稍后保存".into());
+            }
+            let saved = self.store.edit_artifact(&id, &expected, &content)?;
+            r.task = saved.clone();
+            Ok(saved)
+        } else {
+            self.store.edit_artifact(&id, &expected, &content)
+        }
+    }
+
+
+    pub fn start(&self, app: AppHandle, task_id: String) -> Result<Task, String> {
+        let _guard = self.begin_start()?;
+        self.ensure_idle()?;
+        let mut task = self.store.task(&task_id).ok_or("任务不存在，请重新创建")?;
+        if task.archived {
+            return Err("归档任务不能重新启动".into());
+        }
+        for old in self.runs.lock().unwrap().values() {
+            let old = old.lock().unwrap();
+            if old.task.id == task_id && old.task.revision > task.revision {
+                task = old.task.clone();
+            }
+        }
+        task.status = "running".into();
+        task.started_at = Some(now());
+        task.finished_at = None;
+        task.run_id = Some(uuid::Uuid::new_v4().to_string());
+        task.thread_id = None;
+        task.turn_id = None;
+        task.nodes.clear();
+        task.agent_activity_ids.clear();
+        task.approvals.clear();
+        task.artifacts.clear();
+        task.tokens = None;
+        task.revision += 1;
+        task.event("正在连接本机 Codex；文件沙箱只读", "system", "工作台");
+        let run_id = task.run_id.clone().unwrap();
+        let directory = self.store.directory.join("runs").join(&run_id);
+        std::fs::create_dir_all(&directory).map_err(|_| "无法创建任务目录".to_string())?;
+        let mut child = OwnedChild::new(
+            command()
+                .current_dir(&directory)
+                .spawn()
+                .map_err(|_| "无法启动 Codex，请先在执行器设置中检查连接".to_string())?,
+        );
+        let input = child.child.stdin.take().unwrap();
+        let output = child.child.stdout.take().unwrap();
+        let mut stderr = child.child.stderr.take().unwrap();
+        thread::spawn(move || {
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        });
+        let run = Arc::new(Mutex::new(Run {
+            task: task.clone(),
+            child,
+            input,
+            pending: HashMap::new(),
+            controls: HashMap::new(),
+            next_id: 100,
+            model_cursors: Vec::new(),
+            closed: false,
+            last_emit: Instant::now(),
+        }));
+        {
+            let mut runs = self.runs.lock().unwrap();
+            runs.retain(|_, r| !r.lock().unwrap().closed);
+            runs.insert(run_id.clone(), run.clone());
+        }
+        if let Err(error) = self.store.save_task(task.clone()) {
+            let mut r = run.lock().unwrap();
+            r.closed = true;
+            let _ = r.child.stop();
+            return Err(error);
+        }
+        let _ = app.emit("runtime-task", task.clone());
+        let sent = {
+            let mut r = run.lock().unwrap();
+            send(&mut r.input, &initialize())
+        };
+        if let Err(error) = sent {
+            self.fail(&app, &run, &error, "failed");
+            return Ok(run.lock().unwrap().task.clone());
+        }
+
+
+    pub fn shutdown(&self) {
+        let mut lifecycle = self.starting.lock().unwrap();
+        *lifecycle = true;
+        for child in self.inspections.lock().unwrap().iter_mut() {
+            let _ = child.stop();
+        }
+        for run in self.runs.lock().unwrap().values() {
+            let mut r = run.lock().unwrap();
+            if !r.closed {
+                r.closed = true;
+                r.task.status = "unknown".into();
+                r.task.approvals.clear();
+                r.pending.clear();
+                r.task
+                    .event("App 已关闭，在途结果需核对", "system", "工作台");
+            }
+            if r.child.stop().is_err() {
+                r.task.event(
+                    "拥有的进程组清理未确认，请核对本机执行器",
+                    "error",
+                    "工作台",
+                );
+            }
+            let _ = self.store.save_existing_task(r.task.clone());
+        }
+    }
+}
+
+
+    pub fn recover(&mut self) {
+        if matches!(self.status.as_str(), "running" | "approval" | "cancelling") {
+            self.status = "unknown".into();
+            self.approvals.clear();
+            self.revision += 1;
+            for node in &mut self.nodes {
+                if matches!(node.status.as_str(), "running" | "approval" | "cancelling") {
+                    node.status = "unknown".into();
+                }
+            }
+        }
+    }
+
+
+
+Production write callers: Runtime::create and Runtime::start -> Store::save_task; Runtime::publish and Runtime::shutdown -> Store::save_existing_task. No other production save_task callers.

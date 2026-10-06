@@ -1,0 +1,1223 @@
+--- before/src/model.ts
++++ after/src/model.ts
+@@ -1,118 +1,19 @@
+ export type Status = 'queued' | 'running' | 'approval' | 'cancelling' | 'interrupted' | 'completed' | 'failed' | 'unknown';
+ export type Scene = 'research' | 'coding' | 'writing';
+-export type Provider = 'demo' | 'codex';
++export type Provider = 'codex';
+ export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null; agentPath?: string | null; detailNotice?: string | null; detailTurnCount?: number; outputTruncated?: boolean }
+ export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
+ export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
+ export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
+-export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+-export type Action = { type: 'start' | 'tick' | 'cancel' } | { type: 'approve' | 'decline'; id: string } | { type: 'steer'; text: string };
+-
++export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+ export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
+ export const sceneLabels: Record<Scene, string> = { research: '调研', coding: '编程', writing: '写作' };
+ export const isActive = (status: Status) => ['running', 'approval', 'cancelling'].includes(status);
+ export const isTerminal = (status: Status) => ['completed', 'failed', 'interrupted'].includes(status);
+ 
+-function log(task: Task, text: string, now: number, agent = '工作台', kind = 'system'): Task {
+-  return { ...task, revision: task.revision + 1, events: [...task.events, { id: `${task.id}-${task.revision}-${now}`, at: now, kind, agent, text }].slice(-100) };
+-}
+-
+-function demoNodes(): AgentNode[] {
+-  return [
+-    {id:'lead', name:'Coordinator', role:'主 Agent', model:'演示 · 协调', status:'running', summary:'拆解目标，协调交付', output:'将任务拆成探索、分析与复核三个步骤。等待各阶段结果，汇总成可验收的交付。', parentId:null},
+-    {id:'scout',name:'Scout',role:'探索者',model:'演示 · 探索',status:'queued',summary:'查找资料与上下文',output:'',parentId:'lead'},
+-    {id:'analyst',name:'Analyst',role:'研究者',model:'演示 · 分析',status:'queued',summary:'对比方案，形成结论',output:'',parentId:'lead'},
+-    {id:'reviewer',name:'Reviewer',role:'审查者',model:'演示 · 复核',status:'queued',summary:'核对证据与边界',output:'',parentId:'lead'},
+-  ];
+-}
+-
+-export function makeTask(title: string, prompt: string, scene: Scene, provider: Provider, now = Date.now()): Task {
+-  return { id: crypto.randomUUID(), title: title.trim(), prompt: prompt.trim(), scene, provider, status:'queued', createdAt:now, startedAt:null, finishedAt:null, runId:null, threadId:null, turnId:null, revision:0, phase:0, nodes:provider==='demo'?demoNodes().map(n=>({...n,status:'queued'})):[], events:[], approvals:[], artifacts:[], tokens:null };
+-}
+-
+-function delivery(task: Task): Artifact {
+-  const bodies: Record<Scene,string> = {
+-    research: `# ${task.title}\n\n这是演示模式生成的示例交付，不是实际检索结果。\n\n## 建议方案\n\n选择本地桌面架构，使用 Tauri 管理窗口和进程，任务内部协作由执行器负责。优先跑通真实状态、审批与交付。\n\n## 复核意见\n\n- 将任务与运行尝试分开记录。\n- 断线后先核对状态，不自动重复工具调用。\n- 中断请求不能等同于所有外部副作用已撤销。\n\n## 下一步\n\n用一个调研任务和一个编程任务验证完整闭环。\n\n任务目标：${task.prompt}`,
+-    coding: `# ${task.title}\n\n演示交付 · 没有实际修改仓库。\n\n## 变更建议\n\n把任务状态归到单一执行器，界面只消费状态投影；审批使用运行 ID 与请求 ID 关联。\n\n## 验证范围\n\n重复点击、取消与结束同时发生、重启后的过期审批。\n\n任务目标：${task.prompt}`,
+-    writing: `# ${task.title}\n\n演示交付 · 文档草稿\n\n把注意力留给真正需要判断的地方。\n\n在一个工作台里发起任务，看见 Agent 如何协作，在必要时补充信息，最后收取清晰、可检查的成果。\n\n## 产品主张\n\n让多个任务持续推进，让每一次介入都有上下文，让每一份交付都有去处。\n\n任务目标：${task.prompt}`,
+-  };
+-  return {id:`${task.id}-delivery`,name:task.scene==='research'?'方案调研与可行性.md':task.scene==='coding'?'变更建议与验证.md':'产品介绍草稿.md',kind:'markdown',content:bodies[task.scene],createdAt:Date.now()};
+-}
+-
+-export function reduceTask(task: Task, action: Action, now = Date.now()): Task {
+-  if(task.provider!=='demo') return task;
+-  if(action.type==='start' && !isActive(task.status)) {
+-    return log({...task,status:'running',startedAt:now,finishedAt:null,runId:`${task.id}-${now}`,turnId:`turn-${now}`,phase:0,nodes:demoNodes(),approvals:[],artifacts:[],tokens:null},'已启动演示任务，不调用模型',now);
+-  }
+-  if(isTerminal(task.status)) return task;
+-  if(action.type==='cancel' && isActive(task.status)) return log({...task,status:'interrupted',finishedAt:now,approvals:[],nodes:task.nodes.map(n=>n.status==='completed'?n:{...n,status:'interrupted'})},'演示任务已中断',now);
+-  if(action.type==='steer' && isActive(task.status) && action.text.trim()) return log(task,`补充方向：${action.text.trim().slice(0,2000)}`,now,'你','input');
+-  if(action.type==='approve' || action.type==='decline') {
+-    const request=task.approvals.find(a=>a.id===action.id && a.runId===task.runId && a.turnId===task.turnId && a.requestId===action.id);
+-    if(task.status!=='approval' || !request) return task;
+-    if(action.type==='decline') return log({...task,status:'interrupted',finishedAt:now,approvals:[],nodes:task.nodes.map(n=>n.status==='completed'?n:{...n,status:'interrupted'})},'你拒绝了继续执行，演示已停止',now,'你','approval');
+-    return log({...task,status:'running',approvals:[],nodes:task.nodes.map(n=>n.status==='approval'?{...n,status:'running'}:n)},'已确认：按个人桌面场景继续',now,'你','approval');
+-  }
+-  if(action.type!=='tick' || task.status!=='running') return task;
+-  const phase=task.phase+1;
+-  let next={...task,phase};
+-  const change=(id:string,status:Status,summary:string,output:string)=>{ next={...next,nodes:next.nodes.map(n=>n.id===id?{...n,status,summary,output}:n)}; };
+-  if(phase===1) {
+-    change('scout','running','正在收集相关上下文','检索相关资料，整理候选方案与信息缺口。');
+-    return log(next,'已委派 Scout 收集上下文',now,'Coordinator','agent');
+-  }
+-  if(phase===2) {
+-    change('scout','completed','上下文已整理','找到三条候选技术路线，已整理各自的接入方式、能力与限制。演示数据未进行真实检索。');
+-    change('analyst','running','正在对比候选方案','从交互、进程管理与恢复成本三个角度对比方案。');
+-    return log(next,'Scout 返回资料摘要，Analyst 开始分析',now,'Analyst','agent');
+-  }
+-  if(phase===3) {
+-    change('analyst','approval','需要确认交付范围','个人桌面与团队协作的权限、同步和分发成本差异较大。建议本次聚焦个人桌面。');
+-    const id=`${task.runId}-scope`;
+-    return log({...next,status:'approval',approvals:[{id,requestId:id,runId:task.runId!,turnId:task.turnId!,title:'确认本次交付范围',description:'建议先聚焦个人桌面工作台，将团队同步与云端运行留到后续。是否按这个范围继续？',kind:'input',questionIds:[]}]},'需要你确认范围，任务已等待',now,'Analyst','approval');
+-  }
+-  if(phase===4) {
+-    change('analyst','completed','对比与结论已完成','建议先实现本地任务、执行记录、审批与交付；由原生 Agent 运行器负责内部协作。');
+-    change('reviewer','running','正在核对边界','复核状态、审批过期与中断语义；检查是否把未知状态误报为成功。');
+-    return log(next,'分析已完成，Reviewer 开始复核',now,'Reviewer','agent');
+-  }
+-  if(phase>=5) {
+-    next={...next,status:'completed',finishedAt:now,nodes:next.nodes.map(n=>({...n,status:'completed',summary:n.id==='reviewer'?'复核完成 · 边界已记录':n.id==='lead'?'已汇总交付，等待验收':n.summary,output:n.id==='reviewer'?'复核意见：重启需要核对状态；审批不可跨运行复用；真实取消需等待执行器确认。':n.output})),artifacts:[delivery(task)]};
+-    return log(next,'执行结束，已生成演示交付，等待你验收',now,'Coordinator','agent');
+-  }
+-  return next;
+-}
+-
+-export function recoverTasks(tasks: Task[]): Task[] {
+-  return tasks.map(task=>isActive(task.status)?{...task,status:'unknown',approvals:[],nodes:task.nodes.map(n=>isActive(n.status)?{...n,status:'unknown'}:n)}:task);
+-}
+-
+ export function applyRuntime(task: Task, incoming: Task): Task {
+-  if(task.id!==incoming.id || task.provider!=='codex' || incoming.provider!=='codex' || (task.runId!==null && task.runId!==incoming.runId) || incoming.revision<=task.revision) return task;
++  if(task.archived || task.id!==incoming.id || task.provider!=='codex' || incoming.provider!=='codex' || (task.runId!==null && task.runId!==incoming.runId) || incoming.revision<=task.revision) return task;
+   if(isTerminal(task.status) && incoming.status!==task.status) return task;
+   return incoming;
+ }
+ 
+-export function seedTasks(): Task[] {
+-  const now=Date.now();
+-  let research=makeTask('个人 Agent 工作台技术调研','比较桌面技术路线，形成适合个人使用的实现建议与可行性边界。','research','demo',now-60000);
+-  research=reduceTask(research,{type:'start'},now);
+-  const coding=makeTask('梳理任务状态与审批机制','设计任务状态流转，避免旧审批和迟到事件影响新运行。','coding','demo',now-120000);
+-  let writing=makeTask('写一份产品介绍','围绕多任务推进、必要介入和交付验收，写一份简短产品介绍。','writing','demo',now-3600000);
+-  writing={...writing,status:'completed',nodes:demoNodes().map(n=>({...n,status:'completed'})),finishedAt:now-1800000,runId:'demo-writing',revision:5,artifacts:[delivery(writing)]};
+-  return [research,coding,writing];
+-}
+-
+-export function mergeDemoSnapshots(incoming: Task[], stored: Task[]): Task[] {
+-  return incoming.map(task=>{const old=stored.find(t=>t.id===task.id);return old&&old.revision>=task.revision?old:task;});
+-}
+-
+-export function editDocument(task:Task,id:string,expected:string,content:string):Task {
+-  if(task.provider!=='demo'||!isTerminal(task.status))throw new Error('请等任务结束后再编辑交付物');
+-  if(new TextEncoder().encode(content).length>256000)throw new Error('文档超过 256 KB，请缩短后保存');
+-  const matches=task.artifacts.filter(a=>a.id===id);
+-  if(matches.length!==1)throw new Error('文档不存在或标识重复，请重新打开');
+-  if(matches[0].content!==expected)throw new Error('文档已更新，请保留草稿并重新打开');
+-  if(content===expected)return task;
+-  return log({...task,artifacts:task.artifacts.map(a=>a.id===id?{...a,content}:a)},'已保存 Markdown 修改',Date.now(),'你','artifact');
+-}
+--- before/src/model.test.ts
++++ after/src/model.test.ts
+@@ -1,63 +1,29 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { applyRuntime, editDocument, mergeDemoSnapshots, recoverTasks, reduceTask } from './model.ts';
++import { applyRuntime } from './model.ts';
+ import type { Task } from './model.ts';
+ 
+ function fixture(): Task {
+-  return { id: 'task-1', title: 'Research', prompt: 'Research', scene: 'research', provider: 'demo', status: 'approval', createdAt: 0, startedAt: 0, finishedAt: null, runId: 'run-1', threadId: null, turnId: 'turn-1', revision: 1, phase: 3, tokens: null,
+-    nodes: [{id:'lead',name:'Lead',role:'主 Agent',model:'Demo',status:'approval',summary:'',output:'',parentId:null}], events: [], artifacts: [],
++  return { id: 'task-1', title: 'Research', prompt: 'Research', scene: 'research', provider: 'codex', status: 'approval', createdAt: 0, startedAt: 0, finishedAt: null, runId: 'run-1', threadId: null, turnId: 'turn-1', revision: 1, phase: 3, tokens: null,
++    nodes: [{id:'lead',name:'Lead',role:'主 Agent',model:'CLI',status:'approval',summary:'',output:'',parentId:null}], events: [], artifacts: [],
+     approvals: [{id:'approval-1',requestId:'approval-1',runId:'run-1',turnId:'turn-1',title:'Continue?',description:'',kind:'input',questionIds:[]}] };
+ }
+ 
+-test('approval is consumed once and resumes the task', () => {
+-  const next = reduceTask(fixture(), {type:'approve',id:'approval-1'}, 1);
+-  assert.equal(next.status, 'running'); assert.equal(next.approvals.length, 0);
+-  assert.deepEqual(reduceTask(next, {type:'approve',id:'approval-1'}, 2), next);
+-});
+-test('cancel clears approval and terminal tasks cannot advance', () => {
+-  const next = reduceTask(fixture(), {type:'cancel'}, 1);
+-  assert.equal(next.status, 'interrupted'); assert.equal(next.approvals.length,0);
+-  assert.deepEqual(reduceTask(next,{type:'tick'},2),next);
+-});
+-test('stale approval cannot approve a new attempt', () => {
+-  const task = fixture(); task.runId = 'run-2';
+-  assert.deepEqual(reduceTask(task,{type:'approve',id:'approval-1'},1),task);
+-});
+-test('recovery invalidates requests without rerunning tools', () => {
+-  const next = recoverTasks([fixture()])[0];
+-  assert.equal(next.status,'unknown'); assert.equal(next.approvals.length,0);
+-  assert.equal(recoverTasks([{...fixture(),status:'completed',approvals:[]}])[0].status,'completed');
+-});
+ test('late and stale real snapshots cannot overwrite current run', () => {
+   const task = {...fixture(),provider:'codex' as const};
+   assert.deepEqual(applyRuntime(task,{...task,runId:'old',revision:100,status:'completed'}),task);
+   assert.deepEqual(applyRuntime(task,{...task,revision:0,status:'running'}),task);
+   assert.equal(applyRuntime(task,{...task,revision:2,status:'completed'}).status,'completed');
+ });
+-test('wrong request ID and terminal regression are rejected', () => {
+-  const task=fixture();task.approvals[0].requestId='other';
+-  assert.deepEqual(reduceTask(task,{type:'approve',id:'approval-1'},1),task);
+-  const done={...fixture(),provider:'codex' as const,status:'completed' as const};
++test('terminal snapshots cannot regress and newer details are accepted', () => {
++  const done={...fixture(),status:'completed' as const};
+   assert.deepEqual(applyRuntime(done,{...done,revision:2,status:'running'}),done);
+   assert.equal(applyRuntime(done,{...done,revision:2}).revision,2);
+ });
+ 
+-test('Markdown edits reject stale, oversized or running content and retain revisions', () => {
+-  const task:Task={...fixture(),status:'completed',artifacts:[{id:'doc',name:'doc.md',kind:'markdown',content:'# Original',createdAt:0}]};
+-  const next=editDocument(task,'doc','# Original','# Edited');
+-  assert.equal(next.artifacts[0].content,'# Edited');assert.equal(task.artifacts[0].content,'# Original');
+-  assert.equal(next.revision,task.revision+1);
+-  assert.throws(()=>editDocument(next,'doc','# Original','late'));
+-  assert.throws(()=>editDocument(task,'doc','# Original','字'.repeat(85334)));
+-  assert.throws(()=>editDocument({...task,status:'running'},'doc','# Original','late'));
+-  assert.throws(()=>editDocument({...task,artifacts:[...task.artifacts,...task.artifacts]},'doc','# Original','late'));
+-  assert.equal(editDocument(next,'doc','# Edited','# Edited'),next);
+-  assert.equal(editDocument(next,'doc','# Edited','').artifacts[0].content,'');
++test('archived task cannot be changed by a late runtime event', () => {
++  const task={...fixture(),status:'completed' as const,archived:true,artifacts:[{id:'doc',name:'doc.md',kind:'markdown',content:'saved delivery',createdAt:0}]};
++  const next=applyRuntime(task,{...task,archived:false,revision:100,artifacts:[]});
++  assert.equal(next.archived,true);
++  assert.equal(next.artifacts[0].content,'saved delivery');
+ });
+-test('late equal revision demo saves retain the persisted Markdown edit', () => {
+-  const task:Task={...fixture(),status:'completed',artifacts:[{id:'doc',name:'doc.md',kind:'markdown',content:'original',createdAt:0}]};
+-  const next=editDocument(task,'doc','original','edited');
+-  assert.equal(mergeDemoSnapshots([{...task,revision:next.revision}],[next])[0],next);
+-  assert.equal(mergeDemoSnapshots([task],[next])[0],next);
+-  assert.equal(mergeDemoSnapshots([{...next,revision:next.revision+1}],[next])[0].revision,next.revision+1);
+-});
+--- before/src/bridge.ts
++++ after/src/bridge.ts
+@@ -1,32 +1,13 @@
+ import { invoke, isTauri } from '@tauri-apps/api/core';
+ import { listen } from '@tauri-apps/api/event';
+-import { recoverTasks, mergeDemoSnapshots } from './model';
+ import type { Task } from './model';
+ 
+ export const desktop = isTauri();
+-const STORAGE_KEY='orbit-demo-v1';
+ export interface Doctor { available: boolean; initialized: boolean; path: string; version: string; message: string }
+ 
+ export async function loadTasks(): Promise<{tasks:Task[];error:string|null}> {
+   if(desktop) return invoke('load_workspace');
+-  const raw=localStorage.getItem(STORAGE_KEY);
+-  if(!raw) return {tasks:[],error:null};
+-  try {
+-    const tasks=JSON.parse(raw);
+-    if(!Array.isArray(tasks) || tasks.length>50 || tasks.some(t=>!t || t.provider!=='demo' || typeof t.id!=='string' || typeof t.title!=='string' || !Array.isArray(t.nodes) || !Array.isArray(t.events) || !Array.isArray(t.approvals) || !Array.isArray(t.artifacts))) throw new Error('invalid snapshot');
+-    return {tasks:recoverTasks(tasks),error:null};
+-  } catch { return {tasks:[],error:'本地演示记录无法读取，原记录已保留。当前展示临时演示数据。'}; }
+-}
+-export async function saveDemo(tasks: Task[]) {
+-  const demo=tasks.filter(t=>t.provider==='demo').slice(0,50);
+-  if(desktop) await invoke('save_demo',{tasks:demo});
+-  else {
+-    const raw=localStorage.getItem(STORAGE_KEY);
+-    const stored:Task[]=raw?JSON.parse(raw):[];
+-    const merged=mergeDemoSnapshots(demo,stored);
+-    localStorage.setItem(STORAGE_KEY,JSON.stringify(merged));
+-    return merged;
+-  }
++  return {tasks:[],error:null};
+ }
+ export async function watchRuntime(callback:(task:Task)=>void,onWarning:(message:string)=>void) {
+   if(!desktop)return ()=>{};
+@@ -45,3 +26,6 @@
+ export const editArtifact=(artifactId:string,expectedContent:string,content:string)=>invoke<Task>('edit_artifact',{artifactId,expectedContent,content});
+ 
+ export const syncAgents=(taskId:string)=>invoke<Task>('sync_agents',{taskId});
++
++export const archiveTask=(taskId:string)=>invoke<Task>('archive_task',{taskId});
++export const deleteTask=(taskId:string)=>invoke('delete_task',{taskId});
+--- before/src/App.tsx
++++ after/src/App.tsx
+@@ -1,13 +1,13 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { Activity, ArrowRight, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+-import { applyRuntime, editDocument, isActive, isTerminal, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
+-import type { AgentNode, Approval, Artifact, Provider, Scene, Status, Task } from './model';
+-import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
++import { Activity, Archive, Trash2, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
++import { applyRuntime, isActive, isTerminal, sceneLabels, statusLabels } from './model';
++import type { AgentNode, Approval, Artifact, Scene, Status, Task } from './model';
++import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, archiveTask, deleteTask, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+ import type { Doctor } from './bridge';
+ import { Graph } from './Graph';
+ import { AgentOutput, ArtifactEditor } from './ArtifactEditor';
+ 
+-type View='tasks'|'attention'|'artifacts'|'settings';
++type View='tasks'|'archive'|'attention'|'artifacts'|'settings';
+ const time=(n:number)=>new Date(n).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+ const duration=(task:Task,now:number)=>{if(!task.startedAt)return '尚未启动';const seconds=Math.max(0,Math.round(((task.finishedAt||now)-task.startedAt)/1000));return seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;};
+ const errorText=(error:unknown)=>error instanceof Error?error.message:String(error);
+@@ -16,67 +16,52 @@
+ 
+ export default function App() {
+   const [tasks,setTasks]=useState<Task[]>([]),[loaded,setLoaded]=useState(false),[view,setView]=useState<View>('tasks');
+-  const [selectedId,setSelectedId]=useState<string|null>(null),[nodeId,setNodeId]=useState<string|null>('lead');
++  const [selectedId,setSelectedId]=useState<string|null>(null),[nodeId,setNodeId]=useState<string|null>(null);
+   const [scene,setScene]=useState<Scene|'all'>('all'),[query,setQuery]=useState(''),[taskFilter,setTaskFilter]=useState<'all'|'active'|'completed'>('all');
+   const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState(''),[agentOutput,setAgentOutput]=useState<AgentNode|null>(null);
+   const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
+-  const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),lastDemo=useRef('');
+-  const currentTasks=useRef(tasks);currentTasks.current=tasks;
+-  const task=tasks.find(t=>t.id===selectedId)||tasks[0];
++  const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),deletedIds=useRef(new Set<string>());
++  const visibleTasks=tasks.filter(t=>view==='archive'?t.archived:!t.archived);
++  const task=visibleTasks.find(t=>t.id===selectedId)||visibleTasks[0];
+   const node=task?.nodes.find(n=>n.id===nodeId)||task?.nodes[0];
+-  const attention=tasks.flatMap(t=>t.approvals.map(a=>({task:t,approval:a})));
+-  const deliveries=tasks.flatMap(t=>t.artifacts.map(a=>({task:t,artifact:a})));
+-  const active=tasks.filter(t=>isActive(t.status)).length;
++  const attention=tasks.filter(t=>!t.archived).flatMap(t=>t.approvals.map(a=>({task:t,approval:a})));
++  const deliveries=tasks.filter(t=>!t.archived).flatMap(t=>t.artifacts.map(a=>({task:t,artifact:a})));
++  const active=tasks.filter(t=>!t.archived&&isActive(t.status)).length;
+ 
+   useEffect(()=>{
+     mounted.current=true;let unlisten:(()=>void)|undefined;
+     (async()=>{
+-      const release=await watchRuntime(incoming=>{if(mounted.current)setTasks(current=>{const found=current.find(t=>t.id===incoming.id);return found?current.map(t=>t.id===incoming.id?applyRuntime(t,incoming):t):[incoming,...current];});},message=>{if(mounted.current){persistence.current=false;setToast(message);}});
++      const release=await watchRuntime(incoming=>{if(mounted.current&&!deletedIds.current.has(incoming.id))setTasks(current=>{if(deletedIds.current.has(incoming.id))return current;const found=current.find(t=>t.id===incoming.id);return found?current.map(t=>t.id===incoming.id?applyRuntime(t,incoming):t):[incoming,...current];});},message=>{if(mounted.current){persistence.current=false;setToast(message);}});
+       if(!mounted.current){release();return;}unlisten=release;
+       const result=await loadTasks();if(!mounted.current)return;
+       if(result.error){persistence.current=false;setToast(result.error);}
+-      const initial=result.tasks.length?result.tasks:seedTasks();setTasks(initial);setSelectedId(initial[0]?.id||null);setLoaded(true);
+-    })().catch(error=>{if(mounted.current){persistence.current=false;setTasks(seedTasks());setLoaded(true);setToast(`记录读取失败：${errorText(error)}`);}});
++      const initial=result.tasks;setTasks(initial);setSelectedId(initial[0]?.id||null);setLoaded(true);
++    })().catch(error=>{if(mounted.current){persistence.current=false;setTasks([]);setLoaded(true);setToast(`记录读取失败：${errorText(error)}`);}});
+     return()=>{mounted.current=false;unlisten?.();};
+   },[]);
+-  useEffect(()=>{if(!loaded||!persistence.current)return;const signature=JSON.stringify(tasks.filter(t=>t.provider==='demo'));if(signature===lastDemo.current)return;lastDemo.current=signature;const snapshot=tasks;saveQueue.current=saveQueue.current.then(async()=>{await saveDemo(snapshot);}).catch(error=>{persistence.current=false;setToast(`保存失败：${errorText(error)}`);});},[tasks,loaded]);
+-  useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>{setNow(Date.now());setTasks(current=>{const next=current.map(t=>t.provider==='demo'?reduceTask(t,{type:'tick'}):t);return next.some((t,i)=>t!==current[i])?next:current;});},3500);return()=>clearInterval(timer);},[loaded]);
++  useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>setNow(Date.now()),3500);return()=>clearInterval(timer);},[loaded]);
+   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(''),6500);return()=>clearTimeout(timer);},[toast]);
+   useEffect(()=>{const key=(event:KeyboardEvent)=>{if(artifact||agentOutput)return;if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[artifact,agentOutput]);
+ 
+   async function perform(work:()=>Promise<unknown>) {setBusy(true);try{await work();}catch(error){setToast(errorText(error));}finally{setBusy(false);}}
+   function select(t:Task){setSelectedId(t.id);setNodeId(t.nodes[0]?.id||null);setSteer('');}
+-  function act(action:Parameters<typeof reduceTask>[1],target=task){if(target)setTasks(current=>current.map(t=>t.id===target.id?reduceTask(t,action):t));}
+   async function launch(target:Task){
+-    if(target.provider==='demo'){act({type:'start'},target);return;}
+     await perform(async()=>{
+       setTasks(current=>current.map(t=>t.id===target.id?{...t,status:'queued',runId:null,approvals:[]}:t));
+       try {const incoming=await startReal(target);setTasks(current=>{const newer=current.find(t=>t.id===incoming.id&&t.runId===incoming.runId&&t.revision>incoming.revision);return [newer||incoming,...current.filter(t=>t.id!==incoming.id)];});select(incoming);}
+       catch(error){setTasks(current=>current.map(t=>t.id===target.id&&t.runId===null?target:t));throw error;}
+     });
+   }
+-  async function sendDirection(){const text=steer.trim();if(!text||!task)return;if(task.provider==='demo')act({type:'steer',text});else await perform(()=>steerReal(task.runId!,text));setSteer('');}
+-  async function stop(){if(!task)return;if(task.provider==='demo')act({type:'cancel'});else await perform(()=>cancelReal(task.runId!));}
+-  function reply(target:Task,id:string,accept:boolean){if(target.provider==='demo')act({type:accept?'approve':'decline',id},target);}
++  async function sendDirection(){const text=steer.trim();if(!text||!task)return;await perform(()=>steerReal(task.runId!,text));setSteer('');}
++  async function stop(){if(!task)return;await perform(()=>cancelReal(task.runId!));}
+   async function answer(target:Task,id:string,answers:Record<string,string>){await perform(()=>replyReal(target.runId!,id,answers));}
+   async function inspectCli(){setChecking(true);try{setDoctor(await checkCli());}catch(error){setToast(errorText(error));}finally{setChecking(false);}}
+-  async function create(title:string,prompt:string,newScene:Scene,provider:Provider){await perform(async()=>{const next=provider==='codex'?await createReal(title,prompt,newScene):makeTask(title,prompt,newScene,provider);setTasks(current=>[next,...current].slice(0,50));select(next);setView('tasks');setScene('all');setTaskFilter('all');setQuery('');setModal(false);});}
++  async function create(title:string,prompt:string,newScene:Scene){await perform(async()=>{const next=await createReal(title,prompt,newScene);setTasks(current=>[next,...current]);select(next);setView('tasks');setScene('all');setTaskFilter('all');setQuery('');setModal(false);});}
+   async function saveDocument(expected:string,content:string):Promise<Artifact>{
+     const id=artifact!.id;
+     const operation=saveQueue.current.then(async()=>{
+       if(!persistence.current)throw new Error('本地记录无法写入，草稿已保留，请先解决保存问题');
+-      let saved:Task;
+-      if(desktop)saved=await editArtifact(id,expected,content);
+-      else {
+-        const current=currentTasks.current;
+-        if(current.flatMap(t=>t.artifacts.filter(a=>a.id===id)).length!==1)throw new Error('文档不存在或标识重复，请重新打开');
+-        const owner=current.find(t=>t.artifacts.some(a=>a.id===id))!;
+-        saved=editDocument(owner,id,expected,content);
+-        const persisted=await saveDemo(current.map(t=>t.id===saved.id?saved:t));
+-        const stored=persisted?.find(t=>t.id===saved.id);
+-        if(!stored||stored.artifacts.find(a=>a.id===id)?.content!==content)throw new Error('文档已更新，请保留草稿并重新打开');
+-        saved=stored;
+-      }
++      const saved=await editArtifact(id,expected,content);
+       setTasks(current=>current.map(t=>t.id===saved.id&&t.revision<=saved.revision?saved:t));
+       return saved.artifacts.find(a=>a.id===id)!;
+     });
+@@ -84,8 +69,11 @@
+     return operation;
+   }
+   async function syncCollaboration(){if(!task)return;await perform(async()=>{const saved=await syncAgents(task.id);setTasks(current=>current.map(t=>t.id===saved.id&&t.revision<=saved.revision?saved:t));setToast(`协作记录已同步：${saved.nodes.length} 个 Agent`);});}
+-  async function download(file:Artifact){if(desktop){await perform(async()=>{await saveQueue.current;const path=await exportArtifact(file.id);setToast(`交付已保存：${path}`);});return;}const url=URL.createObjectURL(new Blob([file.content],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+-  const filtered=tasks.filter(t=>(scene==='all'||t.scene===scene)&&(!query||`${t.title} ${t.prompt}`.toLowerCase().includes(query.toLowerCase()))&&(taskFilter==='all'||(taskFilter==='active'?isActive(t.status):t.status==='completed')));
++  async function download(file:Artifact){await perform(async()=>{await saveQueue.current;const path=await exportArtifact(file.id);setToast(`交付已保存：${path}`);});}
++  async function archive(){if(!task)return;await perform(async()=>{const saved=await archiveTask(task.id);setTasks(current=>current.map(t=>t.id===saved.id?saved:t));setToast('任务已归档，可在归档列表查看和导出');});}
++  async function remove(){if(!task||deletedIds.current.has(task.id)||!window.confirm(`删除“${task.title}”？此操作永久删除工作台记录及内嵌正文。Codex 会话、运行目录和已导出的文件仍保留。`))return;const id=task.id;deletedIds.current.add(id);await perform(async()=>{try{await deleteTask(id);setTasks(current=>current.filter(t=>t.id!==id));setToast('归档任务已删除');}catch(error){const latest=await loadTasks();if(latest.tasks.some(t=>t.id===id))deletedIds.current.delete(id);if(latest.error){persistence.current=false;setToast(latest.error);}setTasks(latest.tasks);throw error;}});}
++  async function exportDelivery(){if(!task)return;await perform(async()=>{await saveQueue.current;const paths=[];for(const file of task.artifacts)paths.push(await exportArtifact(file.id));setToast(`已导出 ${paths.length} 份交付：${paths.join('；')}`);});}
++  const filtered=visibleTasks.filter(t=>(scene==='all'||t.scene===scene)&&(!query||`${t.title} ${t.prompt}`.toLowerCase().includes(query.toLowerCase()))&&(taskFilter==='all'||(taskFilter==='active'?isActive(t.status):t.status==='completed')));
+ 
+   return <div className="app-shell">
+     <aside className="sidebar">
+@@ -93,50 +81,51 @@
+       <div className="workspace"><span className="workspace-avatar"><Laptop size={17}/></span><span>个人工作空间<small>此设备上的任务与记录</small></span></div>
+       <div className="nav-section">工作空间</div>
+       <nav aria-label="主导航">
+-        <button className={view==='tasks'?'nav-item active':'nav-item'} onClick={()=>setView('tasks')}><LayoutDashboard size={17}/>任务工作台<span>{tasks.length}</span></button>
++        <button className={view==='tasks'?'nav-item active':'nav-item'} onClick={()=>setView('tasks')}><LayoutDashboard size={17}/>任务工作台<span>{tasks.filter(t=>!t.archived).length}</span></button>
+         <button className={view==='attention'?'nav-item active':'nav-item'} onClick={()=>setView('attention')}><Bell size={17}/>待介入{attention.length>0&&<span className="attention-count">{attention.length}</span>}</button>
++        <button className={view==='archive'?'nav-item active':'nav-item'} onClick={()=>{setView('archive');setScene('all');setQuery('');setTaskFilter('all');}}><Archive size={17}/>归档<span>{tasks.filter(t=>t.archived).length}</span></button>
+         <button className={view==='artifacts'?'nav-item active':'nav-item'} onClick={()=>setView('artifacts')}><FolderOpen size={17}/>交付物<span>{deliveries.length}</span></button>
+       </nav>
+       <div className="nav-section scenes-label">任务场景</div>
+       <nav aria-label="场景筛选">{(['all','research','coding','writing'] as const).map(s=><button key={s} className={`nav-item scene-item ${scene===s&&view==='tasks'?'selected-scene':''}`} onClick={()=>{setScene(s);setView('tasks');}}><span className={`scene-dot ${s}`}/>{s==='all'?'全部场景':sceneLabels[s]}</button>)}</nav>
+-      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>本地工作空间</strong><p>{persistence.current?'任务记录自动保存在此设备':'保存不可用，当前修改暂存内存'}</p></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><img src="/orbit.svg" alt=""/><div>Orbit<small>版本 0.1 · 本地工作台</small></div></div></div>
++      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>本地工作空间</strong><p>{!desktop?'浏览器仅预览界面':persistence.current?'任务记录自动保存在此设备':'保存不可用，当前修改暂存内存'}</p></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><img src="/orbit.svg" alt=""/><div>Orbit<small>版本 0.1 · 本地工作台</small></div></div></div>
+     </aside>
+     <main className="main-shell">
+-      <header className="topbar"><div className="breadcrumb">Orbit <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button></div></header>
++      <header className="topbar"><div className="breadcrumb">Orbit <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button></div></header>
+       <div className="page-content">
+-        <div className="page-heading"><div><h1>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</h1><p>{view==='tasks'?'查看进度、协作与结果。':view==='attention'?'处理 Agent 的审批与信息请求。':view==='artifacts'?'预览、编辑和保存任务成果。':'连接本机 Codex，管理执行方式。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
+-        <div className="workspace-summary" aria-label="工作空间概览"><span><span className="status-dot running"/><strong>{active}</strong> 进行中<span className="summary-note">含演示</span></span><button onClick={()=>setView('attention')}><Bell size={14}/><strong>{attention.length}</strong> 待介入</button><button onClick={()=>setView('artifacts')}><FileText size={14}/><strong>{deliveries.length}</strong> 份交付</button></div>
++        <div className="page-heading"><div><h1>{view==='tasks'?'任务工作台':view==='archive'?'归档':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</h1><p>{view==='tasks'?'查看进度、协作与结果。':view==='archive'?'查看已归档的交付，导出或删除任务。':view==='attention'?'处理 Agent 的审批与信息请求。':view==='artifacts'?'预览、编辑和保存任务成果。':'连接本机 Codex，管理执行方式。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
++        <div className="workspace-summary" aria-label="工作空间概览"><span><span className="status-dot running"/><strong>{active}</strong> 进行中</span><button onClick={()=>setView('attention')}><Bell size={14}/><strong>{attention.length}</strong> 待介入</button><button onClick={()=>setView('artifacts')}><FileText size={14}/><strong>{deliveries.length}</strong> 份交付</button></div>
+ 
+-        {view==='tasks'&&<div className="workbench">
+-          <section className="task-panel"><div className="panel-heading"><h2>任务<span>{filtered.length}</span></h2><button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button></div><div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div><label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} aria-pressed={task?.id===t.id} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>{t.provider==='demo'?'演示':'Codex'}</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>没有匹配的任务</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
++        {(view==='tasks'||view==='archive')&&<div className="workbench">
++          <section className="task-panel"><div className="panel-heading"><h2>{view==='archive'?'归档任务':'任务'}<span>{filtered.length}</span></h2>{view!=='archive'&&<button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button>}</div>{view!=='archive'&&<div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div>}<label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} aria-pressed={task?.id===t.id} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>Codex</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>{!visibleTasks.length?'暂无任务':'没有匹配的任务'}</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{!desktop?'浏览器仅预览界面':persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
+           <div className="task-detail">{task?<>
+-            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务':'Codex · 只读'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&task.provider==='codex'&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}<Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
+-            <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`运行 ${task.runId.slice(0,8)}`:'尚无运行'}</span></div>
++            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.archived?'已归档':'Codex · 只读'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&!task.archived&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}{!task.archived&&task.status==='completed'&&task.artifacts.length>0&&<button className="secondary-button compact" disabled={busy} onClick={archive}><Archive size={13}/>归档任务</button>}{task.archived&&<><button className="secondary-button compact" disabled={busy} onClick={exportDelivery}><FileText size={13}/>导出交付</button><button className="secondary-button compact" disabled={busy} onClick={remove}><Trash2 size={13}/>删除任务</button></>}<Badge status={task.status}/>{!task.archived&&(isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||!desktop} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':'新运行'}</button>)}</div></div>
++            <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`运行 ${task.runId.slice(0,8)}`:'尚无运行'}</span></div>
+             {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
+-            <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>{task.provider==='demo'?'演示关系': '已观测关系'}</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
+-              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||(task.provider==='codex'&&node.parentId?(isTerminal(task.status)?'点击“同步协作”读取子会话正文。':'任务结束后，可同步子会话正文。'):'尚无文本输出。')}</p><div className="inspector-detail-actions">{node.agentPath&&<code>{node.agentPath}</code>}{!!node.detailTurnCount&&<span>子会话历史 · {node.detailTurnCount} 轮输出</span>}{node.detailNotice&&<p>{node.detailNotice}</p>}{node.output&&<button className="secondary-button compact" onClick={()=>setAgentOutput(node)}><FileText size={13}/>{node.outputTruncated?'查看输出':'查看完整输出'}</button>}</div><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
+-            {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p>{task.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(task,a.id,true)}>按建议继续<ArrowRight size={13}/></button><button className="text-button" disabled={busy} onClick={()=>reply(task,a.id,false)}>拒绝并停止</button></div>}</div></div>)}
+-            <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，真实事件或演示事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
+-            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>可预览、编辑或下载。</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
+-          </>:<div className="large-empty"><Bot size={40}/><h2>从一个任务开始</h2><p>调研、编程或写作，都可以从这里推进。</p><button className="primary-button" onClick={()=>setModal(true)}><Plus size={16}/>新建任务</button></div>}</div>
++            <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>已观测关系</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
++              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||(task.provider==='codex'&&node.parentId?(task.archived?'归档前未同步子会话正文。':isTerminal(task.status)?'点击“同步协作”读取子会话正文。':'任务结束后，可同步子会话正文。'):'尚无文本输出。')}</p><div className="inspector-detail-actions">{node.agentPath&&<code>{node.agentPath}</code>}{!!node.detailTurnCount&&<span>子会话历史 · {node.detailTurnCount} 轮输出</span>}{node.detailNotice&&<p>{node.detailNotice}</p>}{node.output&&<button className="secondary-button compact" onClick={()=>setAgentOutput(node)}><FileText size={13}/>{node.outputTruncated?'查看输出':'查看完整输出'}</button>}</div><div className="inspector-foot"><ShieldCheck size={13}/>状态来自执行器事件</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
++            {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p><RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/></div></div>)}
++            <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，执行事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
++            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>{task.archived?'可预览或导出。':'可预览、编辑或下载。'}</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
++          </>:<div className="large-empty"><Bot size={40}/><h2>{view==='archive'?'还没有归档任务':'从一个任务开始'}</h2><p>{view==='archive'?'已交付任务可归档，在这里导出或删除。':desktop?'调研、编程或写作，都可以从这里推进。':'打开 Orbit 桌面 App 后可创建和执行本机 Codex 任务。'}</p>{view!=='archive'&&<button className="primary-button" onClick={()=>setModal(true)}><Plus size={16}/>新建任务</button>}</div>}</div>
+         </div>}
+ 
+-        {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">{t.provider==='demo'?'演示':'Codex'} · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p>{t.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(t,a.id,true)}>按建议继续<Check size={14}/></button><button className="text-button" onClick={()=>{select(t);setView('tasks');}}>查看上下文<ArrowUpRight size={13}/></button></div>}</div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
+-        {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">演示结果会明确标注</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{t.provider==='demo'?'演示交付':'Codex 输出'}</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>还没有交付物</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
+-        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器预览仅支持演示；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>一个真实根任务；演示可并行。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
+-        <footer className="page-footer"><span><ShieldCheck size={12}/>{persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit <span>·</span> 个人 Agent 工作台</span></footer>
++        {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">Codex · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p><RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/></div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
++        {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">任务实际生成的交付</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">Codex 输出</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>还没有交付物</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
++        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器仅预览界面；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>同一时间执行一个根任务。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
++        <footer className="page-footer"><span><ShieldCheck size={12}/>{!desktop?'桌面 App 中保存任务记录':persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit <span>·</span> 个人 Agent 工作台</span></footer>
+       </div>
+     </main>
+     {modal&&<NewTask onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
+     {agentOutput&&<AgentOutput node={agentOutput} onClose={()=>setAgentOutput(null)}/> }
+-    {artifact&&<ArtifactEditor key={artifact.id} artifact={artifact} onClose={()=>setArtifact(null)} onSave={saveDocument} onDownload={download}/>}
++    {artifact&&<ArtifactEditor key={artifact.id} artifact={artifact} readOnly={tasks.some(t=>t.archived&&t.artifacts.some(a=>a.id===artifact.id))} onClose={()=>setArtifact(null)} onSave={saveDocument} onDownload={download}/>}
+     {toast&&<div className="toast" role="status"><CircleHelp size={16}/><span>{toast}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setToast('')}><X size={14}/></button></div>}
+   </div>;
+ }
+ 
+-function NewTask({onClose,onCreate,busy}:{onClose:()=>void;onCreate:(title:string,prompt:string,scene:Scene,provider:Provider)=>void;busy:boolean}) {
+-  const [title,setTitle]=useState(''),[prompt,setPrompt]=useState(''),[scene,setScene]=useState<Scene>('research'),[provider,setProvider]=useState<Provider>('demo');
+-  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(title.trim()&&prompt.trim())onCreate(title,prompt,scene,provider);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>新建任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><label>任务场景</label><div className="scene-choices">{(['research','coding','writing'] as Scene[]).map(s=><button key={s} type="button" className={scene===s?'selected':''} onClick={()=>setScene(s)}><span className={`scene-dot ${s}`}/>{sceneLabels[s]}{scene===s&&<Check size={13}/>}</button>)}</div><label>执行方式</label><div className="provider-choices"><button type="button" className={provider==='demo'?'selected':''} onClick={()=>setProvider('demo')}><Sparkles size={17}/><span><strong>交互演示</strong><small>模拟协作，不调用模型</small></span>{provider==='demo'&&<Check size={15}/>}</button><button type="button" disabled={!desktop} className={provider==='codex'?'selected':''} onClick={()=>setProvider('codex')}><Terminal size={17}/><span><strong>本机 Codex</strong><small>{desktop?'只读执行，会消耗模型额度':'需要 Tauri 桌面 App'}</small></span>{provider==='codex'&&<Check size={15}/>}</button></div><div className="new-task-note"><ShieldCheck size={14}/>{provider==='demo'?'创建后点击启动，体验协作与审批流程。':'创建后仍需点击启动。默认文件只读，权限提升会被拒绝。'}</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy||!title.trim()||!prompt.trim()}>创建任务</button></div></form></div>;
++function NewTask({onClose,onCreate,busy}:{onClose:()=>void;onCreate:(title:string,prompt:string,scene:Scene)=>void;busy:boolean}) {
++  const [title,setTitle]=useState(''),[prompt,setPrompt]=useState(''),[scene,setScene]=useState<Scene>('research');
++  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(desktop&&title.trim()&&prompt.trim())onCreate(title,prompt,scene);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>新建任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><label>任务场景</label><div className="scene-choices">{(['research','coding','writing'] as Scene[]).map(s=><button key={s} type="button" className={scene===s?'selected':''} onClick={()=>setScene(s)}><span className={`scene-dot ${s}`}/>{sceneLabels[s]}{scene===s&&<Check size={13}/>}</button>)}</div><label>执行方式</label><div className="new-task-executor"><Terminal size={17}/><span><strong>本机 Codex</strong><small>{desktop?'只读执行，会消耗模型额度':'需要打开 Orbit 桌面 App'}</small></span></div><div className="new-task-note"><ShieldCheck size={14}/>创建后仍需点击启动。默认文件只读，权限提升会被拒绝。</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!desktop||busy||!title.trim()||!prompt.trim()}>创建任务</button></div></form></div>;
+ }
+ 
+ function RealApprovalForm({approval,busy,onAnswer}:{approval:Approval;busy:boolean;onAnswer:(answers:Record<string,string>)=>void}) {
+--- before/src/styles.css
++++ after/src/styles.css
+@@ -279,12 +279,6 @@
+ .scene-choices button { display: flex; align-items: center; gap: 9px; flex: 1; border: 1px solid #d9dce4; border-radius: 7px; padding: 10px 12px; font-size: 12px; color: #54545f; }
+ .scene-choices button > svg { margin-left: auto; color: var(--blue); }
+ .scene-choices button.selected { background: var(--selection); border-color: #8dbbf7; color: var(--blue-ink); }
+-.provider-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+-.provider-choices button { display: flex; align-items: center; gap: 9px; padding: 13px 12px; border: 1px solid #d9dce4; border-radius: 8px; text-align: left; color: #596275; }
+-.provider-choices button.selected { border-color: #8dbbf7; background: var(--selection); color: var(--blue-ink); }
+-.provider-choices strong { display: block; font-size: 12px; font-weight: 550; }
+-.provider-choices small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+-.provider-choices button > svg:last-child:not(:first-child) { margin-left: auto; }
+ .new-task-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 20px; color: var(--muted); font-size: 11px; line-height: 1.8; }
+ .new-task-note > svg { margin-top: 2px; }
+ .modal-footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); background: #fafafd; }
+@@ -437,7 +431,6 @@
+   .modal-heading { padding: 17px 18px; }
+   .modal-body { padding: 20px 18px; }
+   .modal-footer { padding: 15px 18px; flex-wrap: wrap; }
+-  .provider-choices { grid-template-columns: 1fr; }
+   .document-toolbar { padding: 11px 16px; gap: 8px; flex-wrap: wrap; }
+   .document-tabs button { padding: 6px 10px; }
+   .document-toolbar > span { font-size: 10px; }
+@@ -451,3 +444,7 @@
+ @media (prefers-reduced-motion: reduce) {
+   *, *::before, *::after { animation: none !important; transition: none !important; }
+ }
++
++.new-task-executor { display:flex; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:8px; }
++.new-task-executor strong { display:block; font-size:13px; }
++.new-task-executor small { display:block; margin-top:5px; color:var(--muted); font-size:11px; }
+--- before/src-tauri/src/store.rs
++++ after/src-tauri/src/store.rs
+@@ -43,7 +43,11 @@
+                 if disk.version != 1 || disk.tasks.len() > 50 {
+                     return Err("记录版本或任务数量不受支持".into());
+                 }
+-                let mut tasks = disk.tasks;
++                let mut tasks: Vec<_> = disk
++                    .tasks
++                    .into_iter()
++                    .filter(|t| t.provider != "demo")
++                    .collect();
+                 for task in &mut tasks {
+                     validate(task)?;
+                     task.recover();
+@@ -78,47 +82,77 @@
+             .cloned()
+     }
+     pub fn save_task(&self, task: Task) -> Result<(), String> {
++        validate(&task)?;
+         let mut data = self.data.lock().unwrap();
+-        if let Some(old) = data.tasks.iter_mut().find(|t| t.id == task.id) {
++        let mut candidate = data.clone();
++        if let Some(old) = candidate.tasks.iter_mut().find(|t| t.id == task.id) {
+             if task.revision < old.revision {
+                 return Ok(());
+             }
+             *old = task;
+         } else {
+-            data.tasks.insert(0, task);
+-        }
+-        data.tasks.truncate(50);
+-        self.persist(&data)
+-    }
+-    pub fn save_demo(&self, tasks: Vec<Task>) -> Result<(), String> {
+-        if tasks.len() > 50 {
+-            return Err("最多保留 50 个任务".into());
+-        }
+-        for task in &tasks {
+-            validate(task)?;
+-            if task.provider != "demo" {
+-                return Err("前端不能覆盖真实任务".into());
++            if candidate.tasks.len() >= 50 {
++                return Err("已达到 50 个任务，请先删除不需要的归档任务".into());
+             }
+-        }
++            candidate.tasks.insert(0, task);
++        }
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(())
++    }
++    pub fn save_existing_task(&self, mut task: Task) -> Result<Option<Task>, String> {
+         let mut data = self.data.lock().unwrap();
+-        let real: Vec<_> = data
++        let Some(index) = data.tasks.iter().position(|t| t.id == task.id) else {
++            return Ok(None);
++        };
++        let current = &data.tasks[index];
++        if current.archived
++            || current.run_id != task.run_id
++            || task.revision <= current.revision
++            || (current.terminal() && current.status != task.status)
++        {
++            return Ok(None);
++        }
++        if current.terminal() {
++            task.artifacts = current.artifacts.clone();
++        }
++        validate(&task)?;
++        let mut candidate = data.clone();
++        candidate.tasks[index] = task.clone();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(Some(task))
++    }
++    pub fn archive_task(&self, id: &str) -> Result<Task, String> {
++        let mut data = self.data.lock().unwrap();
++        let index = data
+             .tasks
+             .iter()
+-            .filter(|t| t.provider == "codex")
+-            .cloned()
+-            .collect();
+-        if tasks.iter().any(|t| real.iter().any(|r| r.id == t.id)) {
+-            return Err("演示任务 ID 与真实任务冲突".into());
+-        }
+-        let demos = tasks.into_iter().map(|incoming| {
+-            data.tasks
+-                .iter()
+-                .find(|old| old.id == incoming.id && old.revision >= incoming.revision)
+-                .cloned()
+-                .unwrap_or(incoming)
+-        });
++            .position(|t| t.id == id)
++            .ok_or("任务不存在")?;
++        let task = &data.tasks[index];
++        if task.archived {
++            return Ok(task.clone());
++        }
++        if task.status != "completed" || task.artifacts.is_empty() {
++            return Err("仅已交付的任务可以归档".into());
++        }
+         let mut candidate = data.clone();
+-        candidate.tasks = real.into_iter().chain(demos).take(50).collect();
++        candidate.tasks[index].archived = true;
++        candidate.tasks[index].event("任务已归档", "system", "你");
++        let saved = candidate.tasks[index].clone();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(saved)
++    }
++    pub fn delete_task(&self, id: &str) -> Result<(), String> {
++        let mut data = self.data.lock().unwrap();
++        let task = data.tasks.iter().find(|t| t.id == id).ok_or("任务不存在")?;
++        if !task.archived {
++            return Err("请先归档任务后再删除".into());
++        }
++        let mut candidate = data.clone();
++        candidate.tasks.retain(|t| t.id != id);
+         self.persist(&candidate)?;
+         *data = candidate;
+         Ok(())
+@@ -137,6 +171,9 @@
+             .position(|t| t.id == id)
+             .ok_or("任务已不存在")?;
+         let task = &data.tasks[ti];
++        if task.archived {
++            return Err("归档任务只读，不能同步协作".into());
++        }
+         if task.run_id.as_deref() != Some(run_id) || task.turn_id.as_deref() != Some(turn_id) {
+             return Err("任务已进入新一轮运行，请重新同步".into());
+         }
+@@ -172,6 +209,9 @@
+         }
+         let (ti, ai) = matches[0];
+         let task = &data.tasks[ti];
++        if task.archived {
++            return Err("归档交付只读，请导出后编辑".into());
++        }
+         if !task.terminal() {
+             return Err("请等任务结束后再编辑交付物".into());
+         }
+@@ -270,13 +310,16 @@
+     }
+ }
+ fn validate(task: &Task) -> Result<(), String> {
++    if task.archived && (task.status != "completed" || task.artifacts.is_empty()) {
++        return Err("归档记录缺少已完成的交付".into());
++    }
+     if task.agent_activity_ids.len() > crate::protocol::MAX_AGENT_ACTIVITIES
+         || task.agent_activity_ids.iter().any(|id| id.len() > 400)
+     {
+         return Err("Agent 活动记录超过大小限制".into());
+     }
+ 
+-    if !matches!(task.provider.as_str(), "demo" | "codex")
++    if task.provider != "codex"
+         || !matches!(task.scene.as_str(), "research" | "coding" | "writing")
+         || !matches!(
+             task.status.as_str(),
+@@ -318,6 +361,241 @@
+             created_at: 0,
+         });
+         task
++    }
++    #[test]
++    fn legacy_demo_history_is_retired_without_losing_real_documents() {
++        let directory = directory();
++        fs::create_dir_all(&directory).unwrap();
++        let real = document();
++        let mut demo = document();
++        demo.id = "retired-demo".into();
++        demo.provider = "demo".into();
++        demo.artifacts[0].content = "sample content".into();
++        let file = directory.join("workspace.json");
++        let bytes = serde_json::to_vec(&Disk {
++            version: 1,
++            tasks: vec![demo.clone(), real.clone()],
++        })
++        .unwrap();
++        fs::write(&file, &bytes).unwrap();
++        let store = Store::open(directory.clone()).unwrap();
++        assert!(store.workspace().error.is_none());
++        assert_eq!(store.workspace().tasks.len(), 1);
++        assert_eq!(
++            store.task(&real.id).unwrap().artifacts[0].content,
++            "# Original"
++        );
++        assert_eq!(fs::read(&file).unwrap(), bytes);
++        store
++            .edit_artifact("doc", "# Original", "# Real edited")
++            .unwrap();
++        let exported = store.export_artifact("doc").unwrap();
++        assert_eq!(fs::read_to_string(exported).unwrap(), "# Real edited");
++        let reopened = Store::open(directory.clone()).unwrap();
++        assert_eq!(reopened.workspace().tasks.len(), 1);
++        assert_eq!(
++            reopened.task(&real.id).unwrap().artifacts[0].content,
++            "# Real edited"
++        );
++        let disk: Disk = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
++        assert!(disk.tasks.iter().all(|t| t.provider == "codex"));
++        let bytes = serde_json::to_vec(&Disk {
++            version: 1,
++            tasks: vec![demo],
++        })
++        .unwrap();
++        fs::write(&file, &bytes).unwrap();
++        let empty = Store::open(directory.clone()).unwrap();
++        assert!(empty.workspace().error.is_none());
++        assert!(empty.workspace().tasks.is_empty());
++        assert_eq!(fs::read(&file).unwrap(), bytes);
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn unknown_or_invalid_real_history_remains_protected_after_demo_retirement() {
++        for invalid_provider in [true, false] {
++            let directory = directory();
++            fs::create_dir_all(&directory).unwrap();
++            let mut real = document();
++            if invalid_provider {
++                real.provider = "future-provider".into();
++            } else {
++                real.status = "invalid".into();
++            }
++            let mut demo = document();
++            demo.provider = "demo".into();
++            let bytes = serde_json::to_vec(&Disk {
++                version: 1,
++                tasks: vec![demo, real],
++            })
++            .unwrap();
++            let file = directory.join("workspace.json");
++            fs::write(&file, &bytes).unwrap();
++            let store = Store::open(directory.clone()).unwrap();
++            assert!(store.workspace().error.is_some());
++            assert!(store.save_task(document()).is_err());
++            assert_eq!(fs::read(&file).unwrap(), bytes);
++            fs::remove_dir_all(directory).unwrap();
++        }
++    }
++    #[test]
++    fn archived_history_flag_survives_load_and_missing_flag_defaults_false() {
++        let directory = directory();
++        fs::create_dir_all(&directory).unwrap();
++        let mut task = serde_json::to_value(document()).unwrap();
++        task["archived"] = serde_json::json!(true);
++        fs::write(
++            directory.join("workspace.json"),
++            serde_json::to_vec(&serde_json::json!({"version":1,"tasks":[task]})).unwrap(),
++        )
++        .unwrap();
++        let store = Store::open(directory.clone()).unwrap();
++        assert_eq!(
++            serde_json::to_value(&store.workspace().tasks[0]).unwrap()["archived"],
++            true
++        );
++        let mut legacy = serde_json::to_value(document()).unwrap();
++        legacy.as_object_mut().unwrap().remove("archived");
++        let legacy: Task = serde_json::from_value(legacy).unwrap();
++        assert_eq!(serde_json::to_value(legacy).unwrap()["archived"], false);
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn archive_export_delete_is_persistent_and_late_snapshots_cannot_restore_it() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let task = document();
++        store.save_task(task.clone()).unwrap();
++        assert!(store.delete_task(&task.id).is_err());
++        let archived = store.archive_task(&task.id).unwrap();
++        assert!(archived.archived);
++        assert_eq!(
++            store.archive_task(&task.id).unwrap().revision,
++            archived.revision
++        );
++        assert!(store.edit_artifact("doc", "# Original", "changed").is_err());
++        assert!(store
++            .sync_agents(
++                &task.id,
++                "run",
++                "turn",
++                &crate::protocol::AgentHistory {
++                    root: serde_json::Value::Null,
++                    details: vec![]
++                }
++            )
++            .unwrap_err()
++            .contains("归档"));
++        let path = store.export_artifact("doc").unwrap();
++        assert_eq!(fs::read_to_string(&path).unwrap(), "# Original");
++        let mut late = task.clone();
++        late.revision = 100;
++        assert!(store.save_existing_task(late.clone()).unwrap().is_none());
++        assert!(
++            Store::open(directory.clone())
++                .unwrap()
++                .task(&task.id)
++                .unwrap()
++                .archived
++        );
++        store.delete_task(&task.id).unwrap();
++        assert!(store.save_existing_task(late).unwrap().is_none());
++        assert!(Store::open(directory.clone())
++            .unwrap()
++            .workspace()
++            .tasks
++            .is_empty());
++        assert!(std::path::Path::new(&path).exists());
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn archive_qualification_and_disk_failures_leave_state_unchanged() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = document();
++        task.status = "running".into();
++        store.save_task(task.clone()).unwrap();
++        assert!(store.archive_task(&task.id).is_err());
++        task.status = "completed".into();
++        task.artifacts.clear();
++        store.save_task(task.clone()).unwrap();
++        assert!(store.archive_task(&task.id).is_err());
++        task.artifacts = document().artifacts;
++        store.save_task(task.clone()).unwrap();
++        fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store.archive_task(&task.id).is_err());
++        assert!(!store.task(&task.id).unwrap().archived);
++        fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        store.archive_task(&task.id).unwrap();
++        fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store.delete_task(&task.id).is_err());
++        assert!(store.task(&task.id).unwrap().archived);
++        assert!(
++            Store::open(directory.clone())
++                .unwrap()
++                .task(&task.id)
++                .unwrap()
++                .archived
++        );
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn late_runtime_snapshots_preserve_edited_docs_and_require_current_run() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let task = document();
++        store.save_task(task.clone()).unwrap();
++        store
++            .edit_artifact("doc", "# Original", "# Edited")
++            .unwrap();
++        let mut late = task.clone();
++        late.revision = 100;
++        let saved = store.save_existing_task(late.clone()).unwrap().unwrap();
++        assert_eq!(saved.artifacts[0].content, "# Edited");
++        late.revision = 101;
++        late.run_id = Some("wrong-run".into());
++        assert!(store.save_existing_task(late).unwrap().is_none());
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn full_workspace_rejects_creation_and_retains_archived_deliveries() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let delivered = document();
++        store.save_task(delivered.clone()).unwrap();
++        store.archive_task(&delivered.id).unwrap();
++        for _ in 0..49 {
++            store
++                .save_task(Task::new("Task".into(), "Goal".into(), "research".into()))
++                .unwrap();
++        }
++        assert!(store
++            .save_task(Task::new(
++                "Overflow".into(),
++                "Goal".into(),
++                "research".into()
++            ))
++            .is_err());
++        assert_eq!(store.workspace().tasks.len(), 50);
++        let mut current = store.workspace().tasks[0].clone();
++        current.revision += 1;
++        current.title = "Updated at capacity".into();
++        store.save_task(current.clone()).unwrap();
++        assert_eq!(
++            store.task(&current.id).unwrap().title,
++            "Updated at capacity"
++        );
++        let archived = store.task(&delivered.id).unwrap();
++        assert!(archived.archived);
++        assert_eq!(archived.artifacts[0].content, "# Original");
++        assert!(
++            Store::open(directory.clone())
++                .unwrap()
++                .task(&delivered.id)
++                .unwrap()
++                .archived
++        );
++        fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+     fn edits_persist_export_and_reject_stale_or_ambiguous_content() {
+@@ -446,21 +724,6 @@
+         std::fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+-    fn late_demo_snapshot_with_same_revision_cannot_erase_edit() {
+-        let directory = directory();
+-        let store = Store::open(directory.clone()).unwrap();
+-        let mut task = document();
+-        task.provider = "demo".into();
+-        store.save_demo(vec![task.clone()]).unwrap();
+-        let edited = store
+-            .edit_artifact("doc", "# Original", "# Edited")
+-            .unwrap();
+-        task.revision = edited.revision;
+-        store.save_demo(vec![task]).unwrap();
+-        assert_eq!(store.workspace().tasks[0].artifacts[0].content, "# Edited");
+-        fs::remove_dir_all(directory).unwrap();
+-    }
+-    #[test]
+     fn late_snapshot_cannot_replace_newer_state_and_restart_marks_unknown() {
+         let directory = directory();
+         let store = Store::open(directory.clone()).unwrap();
+@@ -484,7 +747,7 @@
+         fs::write(directory.join("workspace.json"), "broken").unwrap();
+         let store = Store::open(directory.clone()).unwrap();
+         assert!(store.workspace().error.is_some());
+-        assert!(store.save_demo(vec![]).is_err());
++        assert!(store.save_task(document()).is_err());
+         assert_eq!(
+             fs::read_to_string(directory.join("workspace.json")).unwrap(),
+             "broken"
+@@ -492,7 +755,7 @@
+         fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+-    fn demo_cannot_overwrite_real_and_export_uses_owned_text() {
++    fn export_uses_owned_text_and_demo_input_is_rejected() {
+         let directory = directory();
+         let store = Store::open(directory.clone()).unwrap();
+         let mut task = Task::new("T".into(), "P".into(), "research".into());
+@@ -506,7 +769,7 @@
+         store.save_task(task.clone()).unwrap();
+         let mut fake = task;
+         fake.provider = "demo".into();
+-        assert!(store.save_demo(vec![fake]).is_err());
++        assert!(store.save_task(fake).is_err());
+         let path = PathBuf::from(store.export_artifact("result").unwrap());
+         assert!(path.starts_with(directory.join("exports").canonicalize().unwrap()));
+         assert_eq!(fs::read_to_string(path).unwrap(), "safe text");
+--- before/src-tauri/src/lib.rs
++++ after/src-tauri/src/lib.rs
+@@ -19,8 +19,12 @@
+         runtime.store.workspace()
+     }
+     #[tauri::command]
+-    fn save_demo(runtime: State<Runtime>, tasks: Vec<Task>) -> Result<(), String> {
+-        runtime.store.save_demo(tasks)
++    fn archive_task(runtime: State<Runtime>, task_id: String) -> Result<Task, String> {
++        runtime.archive_task(task_id)
++    }
++    #[tauri::command]
++    fn delete_task(runtime: State<Runtime>, task_id: String) -> Result<(), String> {
++        runtime.delete_task(task_id)
+     }
+     #[tauri::command]
+     async fn sync_agents(runtime: State<'_, Runtime>, task_id: String) -> Result<Task, String> {
+@@ -116,7 +120,8 @@
+             })
+             .invoke_handler(tauri::generate_handler![
+                 load_workspace,
+-                save_demo,
++                archive_task,
++                delete_task,
+                 export_artifact,
+                 edit_artifact,
+                 sync_agents,
+--- before/README.md
++++ after/README.md
+@@ -34,7 +34,7 @@
+ 
+ ## 体验
+ 
+-- 首次打开有三个示例任务。第一项自动演示探索 → 分析 → 范围确认 → 复核 → 交付。数据明确标注“演示”。
++- 首次打开为空工作空间；已移除交互演示及示例交付，旧演示记录不再显示。已有真实任务保留。
+ - 创建任务，选择调研、编程或写作；点击启动。审批、补充方向、中断、结果预览与导出可交互。
+ - 真正执行需要 Tauri 桌面 App 和已安装、已认证的 Codex CLI。在设置中检查连接，然后创建“本机 Codex”任务并显式点击启动。
+ - 连接检查仅发 initialize，不发 thread/start 或 turn/start，不调用模型。真实任务会消耗 CLI 对应的模型额度。
+@@ -49,15 +49,15 @@
+ - 已结束的真实任务可点击“同步协作”，通过 CLI 历史恢复该轮 Agent 关系；仅执行 initialize 和 thread/read，不调用模型、不重跑任务，保留交付文档编辑。同步失败保留原图。
+ - 子 Agent 仅展示已观测关系。实际 spawn/parentThreadId 及 subAgentActivity 的真实线程 ID 和路径可建立父子关系，sendMessage 不创建父子关系。兼容新旧协作事件并按实际线程 ID 去重；缺失事件不会补造状态或进度百分比。子活动未携带正文或模型信息时不推测这些字段。
+ - 退出 App 强制尝试停止它拥有的进程组；主动脱离该组的进程不在此范围。清理未确认时记录事件并阻止新真实任务。重启保留历史，把在途运行标为需核对，使旧请求失效，不自动续跑。
+-- 执行结束与业务验收分开；Codex 输出是对话交付，演示结果不是实际检索或仓库变更。
++- 执行结束与业务验收分开；Codex 输出是对话交付，是否满足目标需要核对实际内容与证据。
+ 
+ ## 本地记录
+ 
+-Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。任务历史最多保留 50 项，展示活动最多 100 条；每轮独立保留最多 2048 个子活动标识，超限提示关系图不完整并停止接纳新子活动，不淘汰旧标识。Agent 最多 64 个，单条协议消息最多 1 MiB。
++Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。工作空间最多 50 项（含归档）；满额拒绝新建，需要先删除不需要的归档任务，已有记录不会自动淘汰，展示活动最多 100 条；每轮独立保留最多 2048 个子活动标识，超限提示关系图不完整并停止接纳新子活动，不淘汰旧标识。Agent 最多 64 个，单条协议消息最多 1 MiB。
+ 
+-浏览器预览使用本地 localStorage，只提供演示。交付物点击即打开 Markdown 预览，支持标题、列表、表格、代码块；切换“编辑”可修改源码，点击“保存”或 ⌘ / Ctrl S 写入本地记录。文档窗口关闭前会提示未保存修改；直接退出整个 App 时请先保存。只允许编辑已结束任务的交付物，单文档上限 256 KB（UTF-8 字节），旧内容冲突或写盘失败会保留草稿并提示。
++浏览器仅预览空界面，不读取或写入旧 localStorage 演示数据，也不能创建或执行任务。桌面 App 中，交付物点击即打开 Markdown 预览，支持标题、列表、表格、代码块；切换“编辑”可修改源码，点击“保存”或 ⌘ / Ctrl S 写入本地记录。文档窗口关闭前会提示未保存修改；直接退出整个 App 时请先保存。只允许编辑已结束任务的交付物，单文档上限 256 KB（UTF-8 字节），旧内容冲突或写盘失败会保留草稿并提示。
+ 
+-下载使用已保存版本；浏览器下载文件，桌面导出到自己的 AppData/exports。文档中的原始 HTML 不执行，图片显示占位文字，仅允许 HTTP/HTTPS 和页内链接。没有任意文件路径写入接口。
++下载使用已保存版本，导出到 AppData/exports。文档中的原始 HTML 不执行，图片显示占位文字，仅允许 HTTP/HTTPS 和页内链接。没有任意文件路径写入接口。
+ 
+ ## 检查
+ 
+@@ -84,3 +84,9 @@
+ ### 子 Agent 详情
+ 
+ 已结束任务的“同步协作”会读取本轮已观测子 Agent 的会话历史，显示其文本输出和轮次数；点击“查看完整输出”以只读 Markdown 查看。子会话历史不被推定为根任务当前轮次的全部输出，也不会覆盖主交付。模型名称仅显示接口明确返回的值，当前 CLI 可能不提供。读取失败保留原输出并提示；每节点正文上限 64,000 Unicode 字符，超限明确提示并改为“查看输出”。读取只使用 initialize/thread/read，不启动模型。
++
++### 已交付任务归档
++
++执行结束且已有交付物的任务可点击“归档任务”，从日常工作台和交付列表移入左侧“归档”。归档保留 Agent 历史、运行记录和正文，可查看只读 Markdown、导出交付或确认删除；不能编辑或重新启动。执行器清理未确认时无法归档或删除。删除只移除工作台记录及内嵌正文，Codex 会话、运行目录和已导出的文件仍保留。归档/删除先持久化再提交，失败保留记录，迟到事件不会让已删除任务复活。
++
++旧快照在加载时仅过滤 provider 为 demo 的任务，不直接重写文件；下次正常保存不再包含演示记录。未知来源或损坏真实记录仍禁止覆盖。
+--- before/src-tauri/src/model.rs
++++ after/src-tauri/src/model.rs
+@@ -67,6 +67,8 @@
+     pub scene: String,
+     pub provider: String,
+     pub status: String,
++    #[serde(default)]
++    pub archived: bool,
+     pub created_at: u64,
+     pub started_at: Option<u64>,
+     pub finished_at: Option<u64>,
+@@ -92,6 +94,7 @@
+             scene,
+             provider: "codex".into(),
+             status: "running".into(),
++            archived: false,
+             created_at: now(),
+             started_at: Some(now()),
+             finished_at: None,
+--- before/src-tauri/src/runner.rs
++++ after/src-tauri/src/runner.rs
+@@ -193,6 +193,69 @@
+             Store::open(directory.clone()).unwrap().workspace().tasks[0].artifacts[0].content,
+             "edited"
+         );
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[cfg(unix)]
++    fn archive_and_delete_require_idle_runs_and_shutdown_does_not_resurrect() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-archive-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let mut run = fake_run();
++        run.task.status = "completed".into();
++        run.task.artifacts.push(crate::model::Artifact {
++            id: "doc".into(),
++            name: "doc.md".into(),
++            kind: "markdown".into(),
++            content: "delivery".into(),
++            created_at: 0,
++        });
++        let id = run.task.id.clone();
++        runtime.store.save_task(run.task.clone()).unwrap();
++        let run = Arc::new(Mutex::new(run));
++        runtime
++            .runs
++            .lock()
++            .unwrap()
++            .insert("run".into(), run.clone());
++        assert!(runtime.archive_task(id.clone()).is_err());
++        {
++            let mut r = run.lock().unwrap();
++            r.closed = true;
++        }
++        assert!(runtime.archive_task(id.clone()).is_err());
++        {
++            let mut r = run.lock().unwrap();
++            r.child.stop().unwrap();
++        }
++        std::fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(runtime.archive_task(id.clone()).is_err());
++        assert!(!run.lock().unwrap().task.archived);
++        std::fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        let saved = runtime.archive_task(id.clone()).unwrap();
++        assert!(saved.archived);
++        assert!(run.lock().unwrap().task.archived);
++        std::fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(runtime.delete_task(id.clone()).is_err());
++        assert!(runtime.runs.lock().unwrap().contains_key("run"));
++        std::fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        let mut late = run.lock().unwrap().task.clone();
++        late.archived = false;
++        late.revision += 50;
++        assert!(runtime
++            .store
++            .save_existing_task(late.clone())
++            .unwrap()
++            .is_none());
++        runtime.delete_task(id).unwrap();
++        assert!(runtime.runs.lock().unwrap().is_empty());
++        assert!(runtime.store.save_existing_task(late).unwrap().is_none());
++        runtime.shutdown();
++        assert!(Store::open(directory.clone())
++            .unwrap()
++            .workspace()
++            .tasks
++            .is_empty());
+         std::fs::remove_dir_all(directory).unwrap();
+     }
+     fn fake_run() -> Run {
+@@ -987,6 +1050,9 @@
+         let _lifecycle = self.begin_start()?;
+         self.ensure_idle()?;
+         let task = self.store.task(&task_id).ok_or("真实任务不存在")?;
++        if task.archived {
++            return Err("归档任务只读，不能同步协作".into());
++        }
+         if !task.terminal() {
+             return Err("请等任务结束后再同步协作记录".into());
+         }
+@@ -1042,6 +1108,40 @@
+             self.store.edit_artifact(&id, &expected, &content)
+         }
+     }
++    pub fn archive_task(&self, task_id: String) -> Result<Task, String> {
++        let _lifecycle = self.begin_start()?;
++        let matching: Vec<_> = self
++            .runs
++            .lock()
++            .unwrap()
++            .values()
++            .filter(|r| r.lock().unwrap().task.id == task_id)
++            .cloned()
++            .collect();
++        for run in &matching {
++            if !run.lock().unwrap().idle() {
++                return Err("执行器清理尚未确认，请稍后归档".into());
++            }
++        }
++        let saved = self.store.archive_task(&task_id)?;
++        for run in matching {
++            run.lock().unwrap().task = saved.clone();
++        }
++        Ok(saved)
++    }
++    pub fn delete_task(&self, task_id: String) -> Result<(), String> {
++        let _lifecycle = self.begin_start()?;
++        let mut runs = self.runs.lock().unwrap();
++        for run in runs.values() {
++            let r = run.lock().unwrap();
++            if r.task.id == task_id && !r.idle() {
++                return Err("执行器清理尚未确认，不能删除任务".into());
++            }
++        }
++        self.store.delete_task(&task_id)?;
++        runs.retain(|_, r| r.lock().unwrap().task.id != task_id);
++        Ok(())
++    }
+     fn ensure_idle(&self) -> Result<(), String> {
+         {
+             let mut inspections = self.inspections.lock().unwrap();
+@@ -1066,10 +1166,15 @@
+         Ok(())
+     }
+     fn publish(&self, app: &AppHandle, task: Task) {
+-        if let Err(message) = self.store.save_task(task.clone()) {
+-            let _ = app.emit("runtime-warning", message);
+-        }
+-        let _ = app.emit("runtime-task", task);
++        match self.store.save_existing_task(task) {
++            Ok(Some(saved)) => {
++                let _ = app.emit("runtime-task", saved);
++            }
++            Ok(None) => {}
++            Err(message) => {
++                let _ = app.emit("runtime-warning", message);
++            }
++        }
+     }
+     pub fn create(&self, title: String, prompt: String, scene: String) -> Result<Task, String> {
+         if title.trim().is_empty()
+@@ -1092,6 +1197,9 @@
+         let _guard = self.begin_start()?;
+         self.ensure_idle()?;
+         let mut task = self.store.task(&task_id).ok_or("任务不存在，请重新创建")?;
++        if task.archived {
++            return Err("归档任务不能重新启动".into());
++        }
+         for old in self.runs.lock().unwrap().values() {
+             let old = old.lock().unwrap();
+             if old.task.id == task_id && old.task.revision > task.revision {
+@@ -1142,6 +1250,13 @@
+             runs.retain(|_, r| !r.lock().unwrap().closed);
+             runs.insert(run_id.clone(), run.clone());
+         }
++        if let Err(error) = self.store.save_task(task.clone()) {
++            let mut r = run.lock().unwrap();
++            r.closed = true;
++            let _ = r.child.stop();
++            return Err(error);
++        }
++        let _ = app.emit("runtime-task", task.clone());
+         let sent = {
+             let mut r = run.lock().unwrap();
+             send(&mut r.input, &initialize())
+@@ -1150,7 +1265,6 @@
+             self.fail(&app, &run, &error, "failed");
+             return Ok(run.lock().unwrap().task.clone());
+         }
+-        self.publish(&app, task.clone());
+         let runtime = self.clone();
+         let reader_run = run.clone();
+         let reader_app = app.clone();
+@@ -1562,7 +1676,7 @@
+                     "工作台",
+                 );
+             }
+-            let _ = self.store.save_task(r.task.clone());
++            let _ = self.store.save_existing_task(r.task.clone());
+         }
+     }
+ }
+--- before/src/ArtifactEditor.tsx
++++ after/src/ArtifactEditor.tsx
+@@ -4,14 +4,14 @@
+ import { ArrowDownToLine, Code2, Eye, FileText, Loader2, Save, X } from 'lucide-react';
+ import type { AgentNode, Artifact } from './model';
+ 
+-export function ArtifactEditor({artifact,onClose,onSave,onDownload}:{artifact:Artifact;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void}) {
++export function ArtifactEditor({artifact,readOnly=false,onClose,onSave,onDownload}:{artifact:Artifact;readOnly?:boolean;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void}) {
+   const [saved,setSaved]=useState(artifact),[draft,setDraft]=useState(artifact.content);
+   const [mode,setMode]=useState<'preview'|'edit'>('preview'),[saving,setSaving]=useState(false),[error,setError]=useState(''),[confirm,setConfirm]=useState(false);
+   const pending=useRef(false),dialog=useRef<HTMLElement>(null);
+   const dirty=draft!==saved.content;
+   function close(){if(pending.current)return;if(dirty)setConfirm(true);else onClose();}
+   async function save(closeAfter=false){
+-    if(pending.current)return;
++    if(pending.current||readOnly)return;
+     if(!dirty){if(closeAfter)onClose();return;}
+     pending.current=true;setSaving(true);setError('');
+     try{const result=await onSave(saved.content,draft);setSaved(result);setDraft(result.content);setConfirm(false);if(closeAfter)onClose();}
+@@ -39,11 +39,11 @@
+   return <div className="modal-backdrop" onClick={close}>
+     <section ref={dialog} className="document-modal" role="dialog" aria-modal="true" aria-label="Markdown 文档" onClick={e=>e.stopPropagation()}>
+       <div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭文档" disabled={saving} onClick={close}><X size={19}/></button></div>
+-      <div className="document-toolbar"><div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div><span className={dirty?'document-dirty':''}>{saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span><button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button></div>
++      <div className="document-toolbar">{!readOnly&&<div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div>}<span className={dirty?'document-dirty':''}>{readOnly?'归档交付 · 只读':saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span>{!readOnly&&<button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button>}</div>
+       {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<MarkdownBody content={draft}/>}
+       {error&&<div className="document-error" role="alert">{error}</div>}
+       {confirm&&<div className="document-close-confirm" role="alertdialog" aria-label="未保存修改"><div><strong>保存修改后关闭？</strong><span>你的修改尚未保存到本地。</span></div><button className="secondary-button compact" disabled={saving} onClick={()=>setConfirm(false)}>继续编辑</button><button className="secondary-button compact" disabled={saving} onClick={onClose}>丢弃并关闭</button><button className="primary-button compact" disabled={saving} onClick={()=>void save(true)}>保存并关闭</button></div>}
+-      <div className="modal-footer"><span>Markdown · ⌘ / Ctrl S 保存</span><button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
++      <div className="modal-footer"><span>{readOnly?'Markdown · 归档交付':'Markdown · ⌘ / Ctrl S 保存'}</span><button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
+     </section>
+   </div>;
+ }

@@ -1,0 +1,1066 @@
+--- a/src-tauri/src/protocol.rs
++++ b/src-tauri/src/protocol.rs
+@@ -146,6 +146,123 @@
+     target.extend(value.chars().take(remaining));
+ }
+ 
++pub const MAX_AGENT_ACTIVITIES: usize = 2048;
++
++fn valid_agent_path(path: &str) -> bool {
++    path.starts_with("/root/")
++        && path.len() <= 256
++        && path.split('/').skip(1).all(|part| {
++            !part.is_empty()
++                && part != "."
++                && part != ".."
++                && part
++                    .chars()
++                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
++        })
++}
++fn resolve_agent_parents(task: &mut Task) {
++    let mut paths: Vec<_> = task
++        .nodes
++        .iter()
++        .filter_map(|n| n.agent_path.as_ref().map(|p| (n.id.clone(), p.clone())))
++        .collect();
++    if let Some(root) = &task.thread_id {
++        paths.retain(|(id, _)| id != root);
++        paths.push((root.clone(), "/root".into()));
++    }
++    for node in &mut task.nodes {
++        if let Some(path) = &node.agent_path {
++            if let Some((parent, _)) = path.rsplit_once('/') {
++                let matches: Vec<_> = paths
++                    .iter()
++                    .filter(|(id, p)| p == parent && id != &node.id)
++                    .collect();
++                node.parent_id = if matches.len() == 1 {
++                    Some(matches[0].0.clone())
++                } else {
++                    None
++                };
++            }
++        }
++    }
++}
++fn project_activity(task: &mut Task, item: &Value) -> bool {
++    let id = text(item, "agentThreadId");
++    let path = text(item, "agentPath");
++    let kind = text(item, "kind");
++    let item_id = text(item, "id");
++    if id.is_empty()
++        || id.len() > 128
++        || Some(id) == task.thread_id.as_deref()
++        || item_id.is_empty()
++        || item_id.len() > 256
++        || !valid_agent_path(path)
++        || !matches!(kind, "started" | "interacted" | "completed" | "interrupted")
++    {
++        return false;
++    }
++    let event_id = format!(
++        "{}:{item_id}:{kind}",
++        task.run_id.as_deref().unwrap_or("run")
++    );
++    if task.agent_activity_ids.contains(&event_id) {
++        return false;
++    }
++    if task.agent_activity_ids.len() >= MAX_AGENT_ACTIVITIES {
++        const WARNING: &str = "Agent 活动超过 2048 条，新活动暂停投影，关系图不完整";
++        if task.events.iter().any(|e| e.text == WARNING) {
++            return false;
++        }
++        task.event(WARNING, "error", "工作台");
++        return true;
++    }
++    if !task.nodes.iter().any(|n| n.id == id) {
++        if task.nodes.len() >= 64 {
++            if !task
++                .events
++                .iter()
++                .any(|e| e.text == "Agent 超过 64 个，关系图展示不完整")
++            {
++                task.event("Agent 超过 64 个，关系图展示不完整", "error", "工作台");
++                return true;
++            }
++            return false;
++        }
++        task.nodes.push(Node {
++            id: id.into(),
++            name: path.rsplit('/').next().unwrap().into(),
++            role: "子 Agent".into(),
++            model: "实际模型未返回".into(),
++            status: "unknown".into(),
++            summary: String::new(),
++            output: String::new(),
++            parent_id: None,
++            agent_path: Some(path.into()),
++        });
++    }
++    let node = task.nodes.iter_mut().find(|n| n.id == id).unwrap();
++    node.agent_path = Some(path.into());
++    match kind {
++        "started" => node.status = "running".into(),
++        "completed" => node.status = "completed".into(),
++        "interrupted" => node.status = "interrupted".into(),
++        _ => (),
++    }
++    node.summary = match kind {
++        "started" => "子 Agent 已开始工作",
++        "completed" => "子 Agent 本轮已结束",
++        "interrupted" => "已观测到中断活动",
++        _ => "已观测到消息交互",
++    }
++    .into();
++    let name = node.name.clone();
++    resolve_agent_parents(task);
++    task.event(&format!("{path}：{kind}"), "agent", &name);
++    task.agent_activity_ids.push(event_id.clone());
++    task.events.last_mut().unwrap().id = event_id;
++    true
++}
++
+ pub fn project(task: &mut Task, message: &Value) -> bool {
+     let method = text(message, "method");
+     let p = &message["params"];
+@@ -173,6 +290,7 @@
+                 summary: "已观测到子 Agent".into(),
+                 output: String::new(),
+                 parent_id: Some(parent.into()),
++                agent_path: None,
+             });
+         }
+         task.revision += 1;
+@@ -273,12 +391,19 @@
+                     }
+                     task.revision += 1;
+                 }
++                "subAgentActivity" if method == "item/completed" => {
++                    return project_activity(task, item);
++                }
+                 "collabAgentToolCall" => {
+                     let sender = text(item, "senderThreadId");
+                     let spawn = text(item, "tool") == "spawnAgent";
+                     if let Some(states) = item["agentsStates"].as_object() {
+                         for (id, state) in states {
++                            if id.is_empty() || id.len() > 128 || id == &root {
++                                continue;
++                            }
+                             let parent = if spawn
++                                && id != sender
+                                 && (sender == root || task.nodes.iter().any(|n| n.id == sender))
+                             {
+                                 Some(sender.to_string())
+@@ -307,6 +432,7 @@
+                                     summary: "状态来自协作调用".into(),
+                                     output: text(state, "message").chars().take(64000).collect(),
+                                     parent_id: parent,
++                                    agent_path: None,
+                                 });
+                             }
+                         }
+@@ -348,6 +474,130 @@
+     true
+ }
+ 
++pub fn reconcile_agents(task: &Task, history: &Value) -> Result<Task, String> {
++    if task.provider != "codex"
++        || !task.terminal()
++        || Some(text(history, "id")) != task.thread_id.as_deref()
++    {
++        return Err("记录与当前任务不匹配，或任务尚未结束".into());
++    }
++    let turn = history["turns"]
++        .as_array()
++        .and_then(|turns| {
++            turns
++                .iter()
++                .find(|t| Some(text(t, "id")) == task.turn_id.as_deref())
++        })
++        .ok_or("历史中未找到本轮任务")?;
++    let items = turn["items"].as_array().ok_or("协作记录格式不受支持")?;
++    let mut projected = task.clone();
++    projected.status = "running".into();
++    projected.events.clear();
++    projected.agent_activity_ids.clear();
++    projected.root_node();
++    for item in items {
++        let kind = text(item, "type");
++        if !matches!(kind, "subAgentActivity" | "collabAgentToolCall") {
++            continue;
++        }
++        if kind == "subAgentActivity" {
++            let event_id = format!(
++                "{}:{}:{}",
++                task.run_id.as_deref().unwrap_or("run"),
++                text(item, "id"),
++                text(item, "kind")
++            );
++            if projected.agent_activity_ids.len() >= MAX_AGENT_ACTIVITIES
++                && !projected.agent_activity_ids.contains(&event_id)
++            {
++                return Err("Agent 活动超过 2048 条，无法完整同步，原图保留".into());
++            }
++            if !valid_agent_path(text(item, "agentPath"))
++                || text(item, "agentThreadId").is_empty()
++                || text(item, "agentThreadId").len() > 128
++                || Some(text(item, "agentThreadId")) == task.thread_id.as_deref()
++                || text(item, "id").is_empty()
++                || text(item, "id").len() > 256
++                || !matches!(
++                    text(item, "kind"),
++                    "started" | "interacted" | "completed" | "interrupted"
++                )
++            {
++                return Err("协作记录包含不支持的 Agent 活动，原图保留".into());
++            }
++            if projected.nodes.len() >= 64
++                && !projected
++                    .nodes
++                    .iter()
++                    .any(|n| n.id == text(item, "agentThreadId"))
++            {
++                return Err("Agent 超过 64 个，无法完整同步，原图保留".into());
++            }
++        }
++        if kind == "collabAgentToolCall" {
++            let states = item["agentsStates"]
++                .as_object()
++                .ok_or("旧协作记录格式不受支持，原图保留")?;
++            let new = states
++                .keys()
++                .filter(|id| {
++                    Some(id.as_str()) != task.thread_id.as_deref()
++                        && !projected.nodes.iter().any(|n| &n.id == *id)
++                })
++                .count();
++            if projected.nodes.len() + new > 64 {
++                return Err("Agent 超过 64 个，无法完整同步，原图保留".into());
++            }
++        }
++        project(
++            &mut projected,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":task.thread_id,"turnId":task.turn_id,"item":item}}),
++        );
++    }
++    resolve_agent_parents(&mut projected);
++    for node in &mut projected.nodes {
++        if Some(node.id.as_str()) == task.thread_id.as_deref() {
++            if let Some(original) = task.nodes.iter().find(|n| n.id == node.id) {
++                *node = original.clone();
++            } else {
++                node.status = task.status.clone();
++            }
++        } else {
++            if let Some(original) = task
++                .nodes
++                .iter()
++                .find(|n| n.id == node.id && !n.output.is_empty())
++            {
++                node.output = original.output.clone();
++            }
++            if matches!(node.status.as_str(), "running" | "approval" | "queued") {
++                node.status = "unknown".into();
++            }
++        }
++    }
++    let mut ids = task.agent_activity_ids.clone();
++    for id in projected.agent_activity_ids {
++        if !ids.contains(&id) {
++            ids.push(id);
++        }
++    }
++    if ids.len() > MAX_AGENT_ACTIVITIES {
++        return Err("Agent 活动超过去重容量，原图保留".into());
++    }
++    if projected.nodes == task.nodes && ids == task.agent_activity_ids {
++        return Ok(task.clone());
++    }
++    let mut saved = task.clone();
++    saved.nodes = projected.nodes;
++    saved.agent_activity_ids = ids;
++    saved.event(
++        &format!("协作记录已同步：{} 个 Agent", saved.nodes.len()),
++        "agent",
++        "工作台",
++    );
++    Ok(saved)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -502,6 +752,157 @@
+             .unwrap()
+             .parent_id
+             .is_none());
++    }
++    #[test]
++    fn real_subagent_activity_creates_and_completes_three_children() {
++        let mut task = fixture();
++        for name in ["product", "technical", "challenger"] {
++            assert!(project(
++                &mut task,
++                &json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":format!("spawn-{name}"),"type":"subAgentActivity","agentThreadId":name,"agentPath":format!("/root/{name}"),"kind":"started"}}})
++            ));
++        }
++        assert_eq!(task.nodes.len(), 4);
++        assert!(task
++            .nodes
++            .iter()
++            .filter(|n| n.id != "root")
++            .all(|n| n.parent_id.as_deref() == Some("root")));
++        let complete = json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"completed-product","type":"subAgentActivity","agentThreadId":"product","agentPath":"/root/product","kind":"completed"}}});
++        project(&mut task, &complete);
++        let revision = task.revision;
++        assert!(!project(&mut task, &complete));
++        assert_eq!(task.revision, revision);
++        project(
++            &mut task,
++            &json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"input-product","type":"subAgentActivity","agentThreadId":"product","agentPath":"/root/product","kind":"interacted"}}}),
++        );
++        assert_eq!(
++            task.nodes
++                .iter()
++                .find(|n| n.id == "product")
++                .unwrap()
++                .status,
++            "completed"
++        );
++    }
++    #[test]
++    fn actual_history_recovers_three_children_and_preserves_delivery() {
++        let mut history: Value =
++            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        let mut task = fixture();
++        task.thread_id = Some(text(&history, "id").into());
++        task.turn_id = Some(text(&history["turns"][0], "id").into());
++        task.root_node();
++        task.status = "completed".into();
++        task.nodes[0].status = "completed".into();
++        task.nodes[0].agent_path = None; // Old snapshots have no path metadata.
++        task.nodes[0].output = "root delivery".into();
++        task.artifacts.push(Artifact {
++            id: "doc".into(),
++            name: "doc.md".into(),
++            kind: "markdown".into(),
++            content: "user edited delivery".into(),
++            created_at: 0,
++        });
++        history["turns"].as_array_mut().unwrap().push(serde_json::json!({"id":"other-turn","items":[{"type":"subAgentActivity","id":"other","agentThreadId":"outsider","agentPath":"/root/outsider","kind":"started"}]}));
++        let saved = reconcile_agents(&task, &history).unwrap();
++        assert_eq!(saved.nodes.len(), 4);
++        assert!(saved.nodes.iter().all(|n| n.status == "completed"));
++        assert!(saved
++            .nodes
++            .iter()
++            .skip(1)
++            .all(|n| n.parent_id == task.thread_id));
++        assert_eq!(saved.nodes[0].output, "root delivery");
++        assert_eq!(saved.artifacts[0].content, "user edited delivery");
++        assert_eq!(saved.status, task.status);
++        let again = reconcile_agents(&saved, &history).unwrap();
++        assert_eq!(
++            serde_json::to_value(again).unwrap(),
++            serde_json::to_value(&saved).unwrap()
++        );
++        assert!(reconcile_agents(&task, &serde_json::json!({"id":"wrong","turns":[]})).is_err());
++        history["turns"][0]["items"][0]["kind"] = Value::String("unknown-kind".into());
++        assert!(reconcile_agents(&task, &history).is_err());
++    }
++    #[test]
++    fn path_parents_resolve_when_arriving_late_and_legacy_ids_merge() {
++        let mut task = fixture();
++        let event = |id: &str, path: &str, kind: &str| serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":format!("{id}-{kind}"),"type":"subAgentActivity","agentThreadId":id,"agentPath":path,"kind":kind}}});
++        project(
++            &mut task,
++            &event("reviewer", "/root/product/reviewer", "started"),
++        );
++        assert!(task
++            .nodes
++            .iter()
++            .find(|n| n.id == "reviewer")
++            .unwrap()
++            .parent_id
++            .is_none());
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"legacy","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"root","agentsStates":{"product":{"status":"running"}}}}}),
++        );
++        project(&mut task, &event("product", "/root/product", "started"));
++        assert_eq!(task.nodes.len(), 3);
++        assert_eq!(
++            task.nodes
++                .iter()
++                .find(|n| n.id == "reviewer")
++                .unwrap()
++                .parent_id
++                .as_deref(),
++            Some("product")
++        );
++        assert!(!project(&mut task, &event("root", "/root/root", "started")));
++        assert!(!project(
++            &mut task,
++            &event("bad", "/root/product/../bad", "started")
++        ));
++        let mut stale = event("stale", "/root/stale", "started");
++        stale["params"]["turnId"] = Value::String("old-turn".into());
++        assert!(!project(&mut task, &stale));
++    }
++    #[test]
++    fn old_started_cannot_regress_completion_after_display_log_rolls_over() {
++        let mut task = fixture();
++        let start = json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"start-child","type":"subAgentActivity","agentThreadId":"child","agentPath":"/root/child","kind":"started"}}});
++        project(&mut task, &start);
++        project(
++            &mut task,
++            &json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"complete-child","type":"subAgentActivity","agentThreadId":"child","agentPath":"/root/child","kind":"completed"}}}),
++        );
++        for _ in 0..110 {
++            task.event("other activity", "system", "工作台");
++        }
++        assert!(!project(&mut task, &start));
++        assert_eq!(
++            task.nodes.iter().find(|n| n.id == "child").unwrap().status,
++            "completed"
++        );
++    }
++    #[test]
++    fn activity_capacity_reports_incomplete_projection_without_evicting_ids() {
++        let mut task = fixture();
++        let start = json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"start-child","type":"subAgentActivity","agentThreadId":"child","agentPath":"/root/child","kind":"started"}}});
++        project(&mut task, &start);
++        task.agent_activity_ids
++            .extend((0..MAX_AGENT_ACTIVITIES - 1).map(|i| format!("seen-{i}")));
++        let ids = task.agent_activity_ids.clone();
++        assert!(!project(&mut task, &start));
++        let mut new = start.clone();
++        new["params"]["item"]["id"] = Value::String("new-activity".into());
++        assert!(project(&mut task, &new));
++        assert_eq!(task.agent_activity_ids, ids);
++        assert!(task.events.last().unwrap().text.contains("不完整"));
++        let history: Value =
++            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        task.status = "completed".into();
++        task.thread_id = Some(text(&history, "id").into());
++        task.turn_id = Some(text(&history["turns"][0], "id").into());
++        assert!(reconcile_agents(&task, &history).is_err());
+     }
+     #[test]
+     fn recovery_invalidates_pending_approvals() {
+--- a/src-tauri/src/runner.rs
++++ b/src-tauri/src/runner.rs
+@@ -332,6 +332,42 @@
+     }
+     #[test]
+     #[cfg(unix)]
++    fn retained_inspection_blocks_admission_until_cleanup_is_confirmed() {
++        use std::os::unix::process::CommandExt;
++        let directory =
++            std::env::temp_dir().join(format!("orbit-inspection-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let run = fake_run();
++        runtime.inspections.lock().unwrap().push(run.child);
++        assert!(runtime.ensure_idle().is_ok());
++        assert!(runtime.inspections.lock().unwrap().is_empty());
++        let mut uncertain = OwnedChild::new(
++            Command::new("/bin/sh")
++                .args(["-c", "exit 0"])
++                .process_group(0)
++                .spawn()
++                .unwrap(),
++        );
++        thread::sleep(Duration::from_millis(100));
++        assert!(uncertain
++            .stop_with(|_| Err(std::io::Error::from_raw_os_error(libc::EPERM)))
++            .is_err());
++        assert!(uncertain.reaped);
++        runtime.inspections.lock().unwrap().push(uncertain);
++        let lifecycle = runtime.begin_start().unwrap();
++        assert!(runtime.ensure_idle().is_err());
++        assert_eq!(runtime.inspections.lock().unwrap().len(), 1);
++        drop(lifecycle);
++        assert!(runtime
++            .sync_agents("missing".into())
++            .unwrap_err()
++            .contains("清理未确认"));
++        assert!(runtime.begin_start().is_ok()); // Failure released the lifecycle lock.
++        runtime.shutdown();
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[cfg(unix)]
+     fn runtime_preserves_uncertain_cleanup_and_rejects_new_root() {
+         use std::os::unix::process::CommandExt;
+         let directory =
+@@ -462,6 +498,43 @@
+         println!("Confirmed turn/completed and text result: OK");
+     }
+     #[test]
++    #[ignore = "explicit local read-only history check; no inference"]
++    fn local_collaboration_history_without_inference() {
++        let real = std::env::var_os("HOME")
++            .map(PathBuf::from)
++            .unwrap()
++            .join("Library/Application Support/local.orbit.agent-workbench/workspace.json");
++        let disk: Value = serde_json::from_slice(&std::fs::read(real).unwrap()).unwrap();
++        let task: Task = serde_json::from_value(
++            disk["tasks"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .find(|t| t["threadId"] == "01a101a0-bba0-7e00-9a71-07f250c731ef")
++                .unwrap()
++                .clone(),
++        )
++        .unwrap();
++        let directory =
++            std::env::temp_dir().join(format!("orbit-real-sync-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        runtime.store.save_task(task.clone()).unwrap();
++        let saved = runtime.sync_agents(task.id.clone()).unwrap();
++        assert_eq!(saved.nodes.len(), 4);
++        assert!(saved.nodes.iter().all(|n| n.status == "completed"));
++        assert_eq!(saved.artifacts[0].content, task.artifacts[0].content);
++        assert_eq!(saved.status, task.status);
++        assert_eq!(runtime.store.task(&task.id).unwrap().nodes.len(), 4);
++        std::fs::write(
++            directory.join("projected-task.json"),
++            serde_json::to_vec_pretty(&saved).unwrap(),
++        )
++        .unwrap();
++        println!("Actual CLI history restored 4 completed Agent nodes, preserving delivery; projection: {}", directory.join("projected-task.json").display());
++        runtime.shutdown();
++        assert!(runtime.begin_start().is_err());
++    }
++    #[test]
+     #[ignore = "requires local Codex CLI; initialize only, no model calls"]
+     fn local_initialize_without_model_calls() {
+         let result = doctor();
+@@ -475,6 +548,7 @@
+     pub store: Arc<Store>,
+     runs: Arc<Mutex<HashMap<String, Arc<Mutex<Run>>>>>,
+     starting: Arc<Mutex<bool>>,
++    inspections: Arc<Mutex<Vec<OwnedChild>>>,
+ }
+ 
+ #[derive(Serialize)]
+@@ -604,6 +678,66 @@
+ }
+ fn initialize() -> Value {
+     json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"orbit-workbench","title":"Orbit","version":"0.1.0"},"capabilities":{"experimentalApi":false}}})
++}
++
++fn read_agent_history(
++    thread_id: &str,
++    inspections: &Mutex<Vec<OwnedChild>>,
++) -> Result<Value, String> {
++    let mut child = OwnedChild::new(command().spawn().map_err(|_| "无法启动 CLI 读取协作记录")?);
++    let stdout = child.child.stdout.take().unwrap();
++    let stderr = child.child.stderr.take().unwrap();
++    thread::spawn(move || {
++        let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink());
++    });
++    let (tx, rx) = mpsc::sync_channel(8);
++    thread::spawn(move || {
++        let mut reader = BufReader::new(stdout);
++        loop {
++            let result = read_message(&mut reader);
++            let done = !matches!(&result, Ok(Some(_)));
++            if tx.send(result).is_err() || done {
++                break;
++            }
++        }
++    });
++    let result = (|| {
++        let deadline = Instant::now() + Duration::from_secs(20);
++        let receive = |id| -> Result<Value, String> {
++            for _ in 0..128 {
++                let message = rx
++                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
++                    .map_err(|_| "读取协作记录超时，原图保留")??
++                    .ok_or("CLI 已关闭协作记录连接")?;
++                if message["id"] == id {
++                    if message.get("error").is_some() {
++                        return Err(format!(
++                            "协作记录读取失败：{}",
++                            error_message(&message["error"])
++                        ));
++                    }
++                    return Ok(message["result"].clone());
++                }
++            }
++            Err("协作记录通知超过限制，原图保留".into())
++        };
++        let input = child.child.stdin.as_mut().unwrap();
++        send(input, &initialize())?;
++        receive(1)?;
++        send(input, &json!({"method":"initialized","params":{}}))?;
++        send(
++            input,
++            &json!({"id":2,"method":"thread/read","params":{"threadId":thread_id,"includeTurns":true}}),
++        )?;
++        let history = receive(2)?;
++        Ok(history["thread"].clone())
++    })();
++    drop(rx);
++    if child.stop().is_err() {
++        inspections.lock().unwrap().push(child);
++        return Err("协作记录进程清理未确认，原图保留；已阻止新运行".into());
++    }
++    result
+ }
+ 
+ pub fn doctor() -> Doctor {
+@@ -695,6 +829,7 @@
+             store: Arc::new(store),
+             runs: Arc::new(Mutex::new(HashMap::new())),
+             starting: Arc::new(Mutex::new(false)),
++            inspections: Arc::new(Mutex::new(Vec::new())),
+         }
+     }
+     fn begin_start(&self) -> Result<std::sync::MutexGuard<'_, bool>, String> {
+@@ -703,6 +838,32 @@
+             Err("工作台正在关闭，不能启动新任务".into())
+         } else {
+             Ok(guard)
++        }
++    }
++    pub fn sync_agents(&self, task_id: String) -> Result<Task, String> {
++        let _lifecycle = self.begin_start()?;
++        self.ensure_idle()?;
++        let task = self.store.task(&task_id).ok_or("真实任务不存在")?;
++        if !task.terminal() {
++            return Err("请等任务结束后再同步协作记录".into());
++        }
++        let thread_id = task.thread_id.as_deref().ok_or("任务没有 CLI 会话记录")?;
++        let run_id = task.run_id.as_deref().ok_or("任务没有运行标识")?;
++        let turn_id = task.turn_id.as_deref().ok_or("任务没有本轮标识")?;
++        let history = read_agent_history(thread_id, &self.inspections)?;
++        let matching = self.runs.lock().unwrap().get(run_id).cloned();
++        if let Some(run) = matching {
++            let mut r = run.lock().unwrap();
++            if !r.closed {
++                return Err("执行器仍在结束中，请稍后同步".into());
++            }
++            let saved = self
++                .store
++                .sync_agents(&task_id, run_id, turn_id, &history)?;
++            r.task = saved.clone();
++            Ok(saved)
++        } else {
++            self.store.sync_agents(&task_id, run_id, turn_id, &history)
+         }
+     }
+     pub fn edit_artifact(
+@@ -739,6 +900,16 @@
+         }
+     }
+     fn ensure_idle(&self) -> Result<(), String> {
++        {
++            let mut inspections = self.inspections.lock().unwrap();
++            for child in inspections.iter_mut() {
++                let _ = child.stop();
++            }
++            inspections.retain(|child| !child.stopped);
++            if !inspections.is_empty() {
++                return Err("协作记录进程清理未确认，请核对本机进程后重启工作台".into());
++            }
++        }
+         for run in self.runs.lock().unwrap().values() {
+             let mut r = run.lock().unwrap();
+             if !r.closed {
+@@ -791,6 +962,7 @@
+         task.thread_id = None;
+         task.turn_id = None;
+         task.nodes.clear();
++        task.agent_activity_ids.clear();
+         task.approvals.clear();
+         task.artifacts.clear();
+         task.tokens = None;
+@@ -1227,6 +1399,9 @@
+     pub fn shutdown(&self) {
+         let mut lifecycle = self.starting.lock().unwrap();
+         *lifecycle = true;
++        for child in self.inspections.lock().unwrap().iter_mut() {
++            let _ = child.stop();
++        }
+         for run in self.runs.lock().unwrap().values() {
+             let mut r = run.lock().unwrap();
+             if !r.closed {
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -21,6 +21,13 @@
+     #[tauri::command]
+     fn save_demo(runtime: State<Runtime>, tasks: Vec<Task>) -> Result<(), String> {
+         runtime.store.save_demo(tasks)
++    }
++    #[tauri::command]
++    async fn sync_agents(runtime: State<'_, Runtime>, task_id: String) -> Result<Task, String> {
++        let owned = runtime.inner().clone();
++        tauri::async_runtime::spawn_blocking(move || owned.sync_agents(task_id))
++            .await
++            .map_err(|_| "协作记录读取进程失败".to_string())?
+     }
+     #[tauri::command]
+     fn edit_artifact(
+@@ -112,6 +119,7 @@
+                 save_demo,
+                 export_artifact,
+                 edit_artifact,
++                sync_agents,
+                 doctor,
+                 create_task,
+                 start_run,
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,8 +1,8 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { Activity, ArrowRight, ArrowUpRight, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+-import { applyRuntime, editDocument, isActive, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
++import { Activity, ArrowRight, ArrowUpRight, RefreshCw, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
++import { applyRuntime, editDocument, isActive, isTerminal, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
+ import type { Approval, Artifact, Provider, Scene, Status, Task } from './model';
+-import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, steerReal, watchRuntime } from './bridge';
++import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+ import type { Doctor } from './bridge';
+ import { Graph } from './Graph';
+ import { ArtifactEditor } from './ArtifactEditor';
+@@ -83,6 +83,7 @@
+     saveQueue.current=operation.then(()=>{},()=>{});
+     return operation;
+   }
++  async function syncCollaboration(){if(!task)return;await perform(async()=>{const saved=await syncAgents(task.id);setTasks(current=>current.map(t=>t.id===saved.id&&t.revision<=saved.revision?saved:t));setToast(`协作记录已同步：${saved.nodes.length} 个 Agent`);});}
+   async function download(file:Artifact){if(desktop){await perform(async()=>{await saveQueue.current;const path=await exportArtifact(file.id);setToast(`交付已保存：${path}`);});return;}const url=URL.createObjectURL(new Blob([file.content],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+   const filtered=tasks.filter(t=>(scene==='all'||t.scene===scene)&&(!query||`${t.title} ${t.prompt}`.toLowerCase().includes(query.toLowerCase()))&&(taskFilter==='all'||(taskFilter==='active'?isActive(t.status):t.status==='completed')));
+ 
+@@ -109,7 +110,7 @@
+         {view==='tasks'&&<div className="workbench">
+           <section className="task-panel"><div className="panel-heading"><h2>任务<span>{filtered.length}</span></h2><button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button></div><div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div><label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>{t.provider==='demo'?'演示':'Codex'}</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>没有匹配的任务</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
+           <div className="task-detail">{task?<>
+-            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务 · 无模型调用':'Codex · 只读文件沙箱'}</span><h2>{task.title}</h2></div><div className="detail-actions"><Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
++            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务 · 无模型调用':'Codex · 只读文件沙箱'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&task.provider==='codex'&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}<Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
+             <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`RUN ${task.runId.slice(0,8).toUpperCase()}`:'尚无运行'}</span></div>
+             {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
+             <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>{task.provider==='demo'?'演示关系': '已观测关系'}</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
+--- a/src/bridge.ts
++++ b/src/bridge.ts
+@@ -43,3 +43,5 @@
+ export const replyReal=(runId:string,approvalId:string,answers:Record<string,string>)=>invoke('reply_input',{runId,approvalId,answers});
+ 
+ export const editArtifact=(artifactId:string,expectedContent:string,content:string)=>invoke<Task>('edit_artifact',{artifactId,expectedContent,content});
++
++export const syncAgents=(taskId:string)=>invoke<Task>('sync_agents',{taskId});
+--- a/README.md
++++ b/README.md
+@@ -46,13 +46,14 @@
+ - 文件沙箱固定 `read-only`；拒绝权限提升和文件修改审批。MCP 工具配置来自本机 CLI，文件沙箱不等同于对远程服务副作用的隔离。
+ - 真实状态由 Rust 持有，前端仅消费投影。重复或过期信息请求不会重新发送；不自动重试副作用。
+ - “中断请求中”只有在执行器确认后变成“已中断”。确认超时或连接结束显示“需核对”；不承诺外部操作已撤销。
+-- 子 Agent 仅展示已观测关系。实际 spawn/parentThreadId 可建立父子关系，sendMessage 不创建父子关系。缺失事件不会补造状态或进度百分比。
++- 已结束的真实任务可点击“同步协作”，通过 CLI 历史恢复该轮 Agent 关系；仅执行 initialize 和 thread/read，不调用模型、不重跑任务，保留交付文档编辑。同步失败保留原图。
++- 子 Agent 仅展示已观测关系。实际 spawn/parentThreadId 及 subAgentActivity 的真实线程 ID 和路径可建立父子关系，sendMessage 不创建父子关系。兼容新旧协作事件并按实际线程 ID 去重；缺失事件不会补造状态或进度百分比。子活动未携带正文或模型信息时不推测这些字段。
+ - 退出 App 强制尝试停止它拥有的进程组；主动脱离该组的进程不在此范围。清理未确认时记录事件并阻止新真实任务。重启保留历史，把在途运行标为需核对，使旧请求失效，不自动续跑。
+ - 执行结束与业务验收分开；Codex 输出是对话交付，演示结果不是实际检索或仓库变更。
+ 
+ ## 本地记录
+ 
+-Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。任务历史最多保留 50 项，活动最多 100 条，Agent 最多 64 个，单条协议消息最多 1 MiB。
++Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。任务历史最多保留 50 项，展示活动最多 100 条；每轮独立保留最多 2048 个子活动标识，超限提示关系图不完整并停止接纳新子活动，不淘汰旧标识。Agent 最多 64 个，单条协议消息最多 1 MiB。
+ 
+ 浏览器预览使用本地 localStorage，只提供演示。交付物点击即打开 Markdown 预览，支持标题、列表、表格、代码块；切换“编辑”可修改源码，点击“保存”或 ⌘ / Ctrl S 写入本地记录。文档窗口关闭前会提示未保存修改；直接退出整个 App 时请先保存。只允许编辑已结束任务的交付物，单文档上限 256 KB（UTF-8 字节），旧内容冲突或写盘失败会保留草稿并提示。
+ 
+--- a/src-tauri/src/store.rs
++++ b/src-tauri/src/store.rs
+@@ -123,6 +123,33 @@
+         *data = candidate;
+         Ok(())
+     }
++    pub fn sync_agents(
++        &self,
++        id: &str,
++        run_id: &str,
++        turn_id: &str,
++        history: &serde_json::Value,
++    ) -> Result<Task, String> {
++        let mut data = self.data.lock().unwrap();
++        let ti = data
++            .tasks
++            .iter()
++            .position(|t| t.id == id)
++            .ok_or("任务已不存在")?;
++        let task = &data.tasks[ti];
++        if task.run_id.as_deref() != Some(run_id) || task.turn_id.as_deref() != Some(turn_id) {
++            return Err("任务已进入新一轮运行，请重新同步".into());
++        }
++        let saved = crate::protocol::reconcile_agents(task, history)?;
++        if saved.revision == task.revision {
++            return Ok(saved);
++        }
++        let mut candidate = data.clone();
++        candidate.tasks[ti] = saved.clone();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(saved)
++    }
+     pub fn edit_artifact(&self, id: &str, expected: &str, content: &str) -> Result<Task, String> {
+         if content.len() > 256000 {
+             return Err("文档超过 256 KB，请缩短后保存".into());
+@@ -243,6 +270,12 @@
+     }
+ }
+ fn validate(task: &Task) -> Result<(), String> {
++    if task.agent_activity_ids.len() > crate::protocol::MAX_AGENT_ACTIVITIES
++        || task.agent_activity_ids.iter().any(|id| id.len() > 400)
++    {
++        return Err("Agent 活动记录超过大小限制".into());
++    }
++
+     if !matches!(task.provider.as_str(), "demo" | "codex")
+         || !matches!(task.scene.as_str(), "research" | "coding" | "writing")
+         || !matches!(
+@@ -344,6 +377,73 @@
+         fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
++    fn collaboration_sync_is_atomic_preserves_edits_and_rejects_changed_run() {
++        let directory = std::env::temp_dir().join(format!("orbit-sync-{}", uuid::Uuid::new_v4()));
++        let store = Store::open(directory.clone()).unwrap();
++        let history: serde_json::Value =
++            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        let mut task = document();
++        task.thread_id = Some(history["id"].as_str().unwrap().into());
++        task.turn_id = Some(history["turns"][0]["id"].as_str().unwrap().into());
++        task.root_node();
++        task.nodes[0].status = "completed".into();
++        store.save_task(task.clone()).unwrap();
++        let edited = store
++            .edit_artifact("doc", "# Original", "# Edited")
++            .unwrap();
++        std::fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store
++            .sync_agents(
++                &task.id,
++                task.run_id.as_deref().unwrap(),
++                task.turn_id.as_deref().unwrap(),
++                &history
++            )
++            .is_err());
++        assert_eq!(store.task(&task.id).unwrap().revision, edited.revision);
++        std::fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store
++            .sync_agents(
++                &task.id,
++                "old-run",
++                task.turn_id.as_deref().unwrap(),
++                &history
++            )
++            .is_err());
++        let saved = store
++            .sync_agents(
++                &task.id,
++                task.run_id.as_deref().unwrap(),
++                task.turn_id.as_deref().unwrap(),
++                &history,
++            )
++            .unwrap();
++        assert_eq!(saved.nodes.len(), 4);
++        assert_eq!(saved.artifacts[0].content, "# Edited");
++        assert_eq!(
++            store
++                .sync_agents(
++                    &task.id,
++                    task.run_id.as_deref().unwrap(),
++                    task.turn_id.as_deref().unwrap(),
++                    &history
++                )
++                .unwrap()
++                .revision,
++            saved.revision
++        );
++        assert_eq!(
++            Store::open(directory.clone())
++                .unwrap()
++                .task(&task.id)
++                .unwrap()
++                .nodes
++                .len(),
++            4
++        );
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
+     fn late_demo_snapshot_with_same_revision_cannot_erase_edit() {
+         let directory = directory();
+         let store = Store::open(directory.clone()).unwrap();
+--- a/src-tauri/src/model.rs
++++ b/src-tauri/src/model.rs
+@@ -8,7 +8,7 @@
+         .as_millis() as u64
+ }
+ 
+-#[derive(Clone, Debug, Serialize, Deserialize)]
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct Node {
+     pub id: String,
+@@ -19,6 +19,8 @@
+     pub summary: String,
+     pub output: String,
+     pub parent_id: Option<String>,
++    #[serde(default)]
++    pub agent_path: Option<String>,
+ }
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -66,6 +68,8 @@
+     pub thread_id: Option<String>,
+     pub turn_id: Option<String>,
+     pub revision: u64,
++    #[serde(default)]
++    pub agent_activity_ids: Vec<String>,
+     pub phase: u32,
+     pub nodes: Vec<Node>,
+     pub events: Vec<Activity>,
+@@ -89,6 +93,7 @@
+             thread_id: None,
+             turn_id: None,
+             revision: 1,
++            agent_activity_ids: vec![],
+             phase: 0,
+             nodes: vec![],
+             events: vec![],
+@@ -139,6 +144,7 @@
+                         summary: "正在执行你的任务".into(),
+                         output: String::new(),
+                         parent_id: None,
++                        agent_path: Some("/root".into()),
+                     },
+                 );
+             }
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -1,11 +1,11 @@
+ export type Status = 'queued' | 'running' | 'approval' | 'cancelling' | 'interrupted' | 'completed' | 'failed' | 'unknown';
+ export type Scene = 'research' | 'coding' | 'writing';
+ export type Provider = 'demo' | 'codex';
+-export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null }
++export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null; agentPath?: string | null }
+ export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
+ export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
+ export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
+-export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
++export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+ export type Action = { type: 'start' | 'tick' | 'cancel' } | { type: 'approve' | 'decline'; id: string } | { type: 'steer'; text: string };
+ 
+ export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
+--- /dev/null
++++ b/src-tauri/fixtures/subagent-history.json
+@@ -0,0 +1,94 @@
++{
++  "id": "01a101a0-bba0-7e00-9a71-07f250c731ef",
++  "turns": [
++    {
++      "id": "01a101a0-bec4-77c1-b51f-fbdbc7064895",
++      "items": [
++        {
++          "type": "subAgentActivity",
++          "id": "call_LBZEt5K9oJnqiWESfmzJmmTI",
++          "kind": "started",
++          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
++          "agentPath": "/root/product"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "call_5ZRhklJhvxp3SWpkRpNVuFMs",
++          "kind": "started",
++          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
++          "agentPath": "/root/technical"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "call_wVudC5aeMKMRsT3P1NHyN608",
++          "kind": "started",
++          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
++          "agentPath": "/root/challenger"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a1-63b8-7700-9ba6-ea021730c242",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
++          "agentPath": "/root/challenger"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a1-3a57-7441-a8c3-9c0386c09823",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
++          "agentPath": "/root/product"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a1-4adc-78e3-8de7-124ffdf62a2c",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
++          "agentPath": "/root/technical"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "call_hfVdoYJso9JL6USHCjQMQzhV",
++          "kind": "interacted",
++          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
++          "agentPath": "/root/challenger"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a2-b4ff-7262-b851-03430900c9d1",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
++          "agentPath": "/root/challenger"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "call_XlRlYR2EI22H3zOfCaaVGXzo",
++          "kind": "interacted",
++          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
++          "agentPath": "/root/product"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "call_aPrMixw02CEhtcb4w097LWcR",
++          "kind": "interacted",
++          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
++          "agentPath": "/root/technical"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a3-2fff-7ae0-8d85-58b93e0abdfa",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
++          "agentPath": "/root/product"
++        },
++        {
++          "type": "subAgentActivity",
++          "id": "subagent-completed-01a101a3-4ded-74f1-b1fe-d3008c0b9a9b",
++          "kind": "completed",
++          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
++          "agentPath": "/root/technical"
++        }
++      ]
++    }
++  ]
++}
+--- /dev/null
++++ b/docs/subagent-display-plan.md
+@@ -0,0 +1,9 @@
++# Repair observed multi-Agent display
++
++Architect A reviewed the candidate. Root cause: installed CLI 0.150.1 emits subAgentActivity, while Orbit only handles legacy collabAgentToolCall/thread-start parent fields. Read-only thread/read confirms three real children and twelve activity items for the user knowledge-base task.
++
++1. Project actual child IDs, paths and explicit activity kinds; unify IDs with legacy nodes, infer only exact known path parents, resolve parents after collection, bound nodes/paths, deduplicate event IDs, keep interacted from regressing a completed child. Unknown parents remain independent. Add a real-schema RED regression before production edits.
++2. Add read-only collaboration sync for a terminal real task. A bounded OwnedChild handshake + thread/read (never start/resume/turn) fetches history. Select exact thread/turn, rebuild only collaboration fields, merge into latest Store task under lifecycle protection, persist then commit and synchronize its closed Run. Keep root output/status and edited artifacts. Identical sync is a no-op. Errors keep prior graph; bounded stdout/stderr, timeout and process-group cleanup apply throughout.
++3. Add one desktop button; browser remains demo-only. Verify actual recorded history without model calls, Store write failure/identity checks, runtime lifecycle, UI graph projection, regressions, App bundle and final architect C. Native UI automation remains unavailable; do not claim native button clicks were tested. Existing App must be reopened to use new bundle.
++
++No new dependency, model rerun, unrelated feature, commit or worktree.

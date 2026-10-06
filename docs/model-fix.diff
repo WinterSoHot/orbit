@@ -1,0 +1,475 @@
+--- a/src-tauri/src/protocol.rs
++++ b/src-tauri/src/protocol.rs
+@@ -1,6 +1,106 @@
+ use crate::model::{now, Artifact, Node, Task};
+ use serde_json::Value;
+ use std::io::{BufRead, Read};
++
++#[derive(Debug, PartialEq)]
++pub enum ModelChoice {
++    Selected(String),
++    NextPage(String),
++}
++pub fn select_model(result: &Value, cursors: &mut Vec<String>) -> Result<ModelChoice, String> {
++    let rows = result["data"].as_array().ok_or("模型目录响应无效")?;
++    if let Some(model) = rows
++        .iter()
++        .find(|m| m["isDefault"] == true && m["hidden"] == false)
++        .and_then(|m| m["model"].as_str())
++        .filter(|id| !id.trim().is_empty() && id.len() <= 256)
++    {
++        return Ok(ModelChoice::Selected(model.into()));
++    }
++    let Some(cursor) = result["nextCursor"].as_str().filter(|s| !s.is_empty()) else {
++        return Err("CLI 模型目录没有可见的默认模型，请检查 CLI 版本与配置".into());
++    };
++    if cursors.len() >= 7 || cursors.iter().any(|seen| seen == cursor) {
++        return Err("模型目录分页重复或超过 8 页，已停止启动".into());
++    }
++    cursors.push(cursor.into());
++    Ok(ModelChoice::NextPage(cursor.into()))
++}
++pub fn thread_request(directory: &std::path::Path, model: &str) -> Value {
++    serde_json::json!({"id":2,"method":"thread/start","params":{"model":model,"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。将最终交付直接写在回答中。","ephemeral":false}})
++}
++// Only error.message is read; never persist raw protocol payloads or stderr.
++pub fn error_message(error: &Value) -> String {
++    let mut message = error["message"]
++        .as_str()
++        .unwrap_or("执行器未提供错误详情")
++        .to_string();
++    for _ in 0..2 {
++        let Ok(nested) = serde_json::from_str::<Value>(&message) else {
++            break;
++        };
++        let Some(inner) = nested["error"]["message"].as_str() else {
++            break;
++        };
++        message = inner.to_string();
++    }
++    // Conservative: once a credential label appears, hide the remainder rather
++    // than guessing where an opaque value ends. ASCII case folding preserves
++    // the byte positions used to truncate the original UTF-8 message.
++    let lower = message.to_ascii_lowercase();
++    let labels = [
++        "api_key",
++        "api-key",
++        "apikey",
++        "access_token",
++        "accesstoken",
++        "refresh_token",
++        "token",
++        "secret",
++        "password",
++        "passwd",
++        "authorization",
++        "cookie",
++        "bearer",
++        "key",
++    ];
++    let cutoff = labels
++        .iter()
++        .flat_map(|label| {
++            lower.match_indices(label).filter_map(|(at, _)| {
++                let boundary = |c: char| !c.is_alphanumeric() && c != '_';
++                let left = lower[..at].chars().next_back().is_none_or(boundary);
++                let right = lower[at + label.len()..]
++                    .chars()
++                    .next()
++                    .is_none_or(boundary);
++                (left && right).then_some(at)
++            })
++        })
++        .min();
++    if let Some(at) = cutoff {
++        message.truncate(at);
++        message.push_str(" [已隐藏]");
++    }
++    let safe = message
++        .split_whitespace()
++        .map(|word| {
++            let lower = word.to_ascii_lowercase();
++            if lower.contains("sk-") || lower.contains("eyj") || lower.contains("://") {
++                "[已隐藏]"
++            } else {
++                word
++            }
++        })
++        .collect::<Vec<_>>()
++        .join(" ");
++    let safe: String = safe.chars().take(1600).collect();
++    if safe.is_empty() {
++        "执行器未提供错误详情".into()
++    } else {
++        safe
++    }
++}
+ 
+ pub const MAX_MESSAGE: usize = 1024 * 1024;
+ pub fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, String> {
+@@ -105,6 +205,7 @@
+                 return false;
+             }
+             let status = text(turn, "status");
++            let failure = format!("执行失败：{}", error_message(&turn["error"]));
+             task.status = match status {
+                 "completed" => "completed",
+                 "interrupted" => "interrupted",
+@@ -115,12 +216,11 @@
+             task.approvals.clear();
+             if let Some(n) = task.nodes.iter_mut().find(|n| n.id == root) {
+                 n.status = task.status.clone();
+-                n.summary = if status == "completed" {
+-                    "本轮执行结束，等待验收"
+-                } else {
+-                    "本轮执行已终止"
+-                }
+-                .into();
++                n.summary = match status {
++                    "completed" => "本轮执行结束，等待验收".into(),
++                    "interrupted" => "本轮执行已终止".into(),
++                    _ => failure.clone(),
++                };
+             }
+             for node in &mut task.nodes {
+                 if node.id != root
+@@ -152,7 +252,7 @@
+                 } else if status == "interrupted" {
+                     "执行器确认本轮已中断"
+                 } else {
+-                    "执行器报告本轮失败"
++                    &failure
+                 },
+                 "agent",
+                 "Codex",
+@@ -261,6 +361,96 @@
+         task
+     }
+     #[test]
++    fn catalog_default_is_explicit_and_hidden_models_are_not_selected() {
++        let mut cursors = Vec::new();
++        let choice = select_model(&json!({"data":[{"model":"hidden","isDefault":true,"hidden":true},{"model":"catalog-default","isDefault":true,"hidden":false}]}), &mut cursors).unwrap();
++        assert_eq!(choice, ModelChoice::Selected("catalog-default".into()));
++        let request = thread_request(std::path::Path::new("/tmp/run"), "catalog-default");
++        assert_eq!(request["method"], "thread/start");
++        assert_eq!(request["params"]["model"], "catalog-default");
++        assert_eq!(request["params"]["sandbox"], "read-only");
++    }
++    #[test]
++    fn model_pagination_handles_later_default_and_rejects_loops_or_missing_default() {
++        let mut cursors = Vec::new();
++        assert_eq!(
++            select_model(&json!({"data":[],"nextCursor":"page-2"}), &mut cursors).unwrap(),
++            ModelChoice::NextPage("page-2".into())
++        );
++        assert_eq!(
++            select_model(
++                &json!({"data":[{"model":"later","isDefault":true,"hidden":false}]}),
++                &mut cursors
++            )
++            .unwrap(),
++            ModelChoice::Selected("later".into())
++        );
++        assert!(select_model(&json!({"data":[],"nextCursor":"page-2"}), &mut cursors).is_err());
++        assert!(select_model(&json!({"data":[],"nextCursor":null}), &mut Vec::new()).is_err());
++        assert!(select_model(
++            &json!({"data":[],"nextCursor":"overflow"}),
++            &mut vec!["seen".into(); 7]
++        )
++        .is_err());
++    }
++    #[test]
++    fn failure_details_are_visible_but_stale_errors_are_ignored() {
++        let mut task = fixture();
++        let error = json!({"message":"{\"error\":{\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\"}}"});
++        assert!(!project(
++            &mut task,
++            &json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"old","status":"failed","error":error}}})
++        ));
++        assert!(task.events.is_empty());
++        assert!(project(
++            &mut task,
++            &json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"failed","error":error}}})
++        ));
++        assert_eq!(task.status, "failed");
++        assert!(task.events.last().unwrap().text.contains("gpt-6.1-sol"));
++        assert!(task.nodes[0].summary.contains("not supported"));
++    }
++    #[test]
++    fn provider_error_redacts_common_credentials_before_truncation() {
++        let message = error_message(
++            &json!({"message":"Model gpt-example rejected Bearer abcsecret sk-private eyJprivate.jwt token=private secret=private https://host/path?key=private"}),
++        );
++        assert!(message.contains("Model gpt-example rejected"));
++        for secret in [
++            "abcsecret",
++            "sk-private",
++            "eyJprivate",
++            "token=private",
++            "secret=private",
++            "https://host",
++        ] {
++            assert!(!message.contains(secret));
++        }
++        assert!(
++            error_message(&json!({"message":"x".repeat(4000)}))
++                .chars()
++                .count()
++                <= 1600
++        );
++    }
++    #[test]
++    fn opaque_credentials_with_spaces_and_quotes_are_not_persisted() {
++        for detail in [
++            "token= abcsecret",
++            "api_key: abcsecret",
++            "password: abcsecret",
++            "\"api_key\" = \"abcsecret\"",
++            "{\"error\":\"bad\",\"api_key\":\"abcsecret\"}",
++        ] {
++            let message = error_message(&json!({"message":format!("Model rejected: {detail}")}));
++            assert!(message.contains("Model rejected"));
++            assert!(
++                !message.contains("abcsecret"),
++                "credential leaked: {detail}"
++            );
++        }
++    }
++    #[test]
+     fn completion_ignores_old_turn_and_is_terminal() {
+         let mut task = fixture();
+         assert!(!project(
+--- a/src-tauri/src/runner.rs
++++ b/src-tauri/src/runner.rs
+@@ -1,6 +1,6 @@
+ use crate::{
+     model::{now, Approval, Task},
+-    protocol::{project, read_message},
++    protocol::{error_message, project, read_message, select_model, thread_request, ModelChoice},
+     store::Store,
+ };
+ use serde::Serialize;
+@@ -23,6 +23,7 @@
+     pending: HashMap<String, Value>,
+     controls: HashMap<u64, String>,
+     next_id: u64,
++    model_cursors: Vec<String>,
+     closed: bool,
+     last_emit: Instant,
+ }
+@@ -173,6 +174,7 @@
+             pending: HashMap::new(),
+             controls: HashMap::new(),
+             next_id: 100,
++            model_cursors: Vec::new(),
+             closed: false,
+             last_emit: Instant::now(),
+         }
+@@ -317,6 +319,106 @@
+         assert!(runtime.ensure_idle().is_err());
+         assert_eq!(runtime.runs.lock().unwrap().len(), 1);
+         std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    #[ignore = "explicit real inference check; replies OK, no tools or user task"]
++    fn local_minimal_real_turn_with_catalog_default() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-model-smoke-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&directory).unwrap();
++        let mut child = OwnedChild::new(command().current_dir(&directory).spawn().unwrap());
++        let mut input = child.child.stdin.take().unwrap();
++        let output = child.child.stdout.take().unwrap();
++        let mut stderr = child.child.stderr.take().unwrap();
++        thread::spawn(move || {
++            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
++        });
++        let (tx, rx) = mpsc::channel();
++        thread::spawn(move || {
++            let mut reader = BufReader::new(output);
++            loop {
++                match read_message(&mut reader) {
++                    Ok(Some(value)) => {
++                        if tx.send(Ok(value)).is_err() {
++                            break;
++                        }
++                    }
++                    _ => {
++                        let _ = tx.send(Err("executor ended"));
++                        break;
++                    }
++                }
++            }
++        });
++        let mut task = Task::new(
++            "Orbit connection verification".into(),
++            "Reply exactly OK. Do not use tools, edit files, or spawn agents.".into(),
++            "writing".into(),
++        );
++        let mut cursors = Vec::new();
++        send(&mut input, &initialize()).unwrap();
++        let deadline = Instant::now() + Duration::from_secs(60);
++        while !task.terminal() {
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            let message = rx
++                .recv_timeout(remaining)
++                .expect("real turn timeout")
++                .unwrap();
++            if message.get("error").is_some() {
++                panic!("{}", error_message(&message["error"]));
++            }
++            if message.get("method").is_some() && message.get("id").is_some() {
++                send(&mut input, &json!({"id":message["id"],"error":{"code":-32601,"message":"No tool requests in this verification"}})).unwrap();
++            } else if let Some(id) = message["id"].as_u64() {
++                match id {
++                    1 => {
++                        send(&mut input, &json!({"method":"initialized"})).unwrap();
++                        send(
++                            &mut input,
++                            &json!({"id":4,"method":"model/list","params":{"limit":100}}),
++                        )
++                        .unwrap();
++                    }
++                    4 => match select_model(&message["result"], &mut cursors).unwrap() {
++                        ModelChoice::Selected(model) => {
++                            println!("Requested catalog default: {model}");
++                            send(&mut input, &thread_request(&directory, &model)).unwrap();
++                        }
++                        ModelChoice::NextPage(cursor) => {
++                            send(&mut input, &json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}})).unwrap();
++                        }
++                    },
++                    2 => {
++                        task.thread_id =
++                            message["result"]["thread"]["id"].as_str().map(String::from);
++                        assert!(task.thread_id.is_some());
++                        task.root_node();
++                        println!("Actual thread model: {}", message["result"]["model"]);
++                        send(&mut input, &json!({"id":3,"method":"turn/start","params":{"threadId":task.thread_id,"input":[{"type":"text","text":task.prompt}]}})).unwrap();
++                    }
++                    3 => {
++                        task.turn_id = message["result"]["turn"]["id"].as_str().map(String::from);
++                    }
++                    _ => (),
++                }
++            } else {
++                project(&mut task, &message);
++            }
++        }
++        assert_eq!(
++            task.status,
++            "completed",
++            "{}",
++            task.events
++                .last()
++                .map(|e| e.text.as_str())
++                .unwrap_or("no event")
++        );
++        let output = &task.nodes[0].output;
++        assert_eq!(output.trim(), "OK");
++        child.stop().unwrap();
++        std::fs::remove_dir_all(directory).unwrap();
++        println!("Confirmed turn/completed and text result: OK");
+     }
+     #[test]
+     #[ignore = "requires local Codex CLI; initialize only, no model calls"]
+@@ -642,6 +744,7 @@
+             pending: HashMap::new(),
+             controls: HashMap::new(),
+             next_id: 100,
++            model_cursors: Vec::new(),
+             closed: false,
+             last_emit: Instant::now(),
+         }));
+@@ -822,12 +925,13 @@
+                     self.publish(app, snapshot);
+                     return true;
+                 }
++                let detail = error_message(&message["error"]);
+                 let label = "初始化或启动";
+                 drop(r);
+                 self.fail(
+                     app,
+                     run,
+-                    &format!("{}请求被执行器拒绝，请检查 CLI 配置与权限", label),
++                    &format!("{}请求被执行器拒绝：{}", label, detail),
+                     "failed",
+                 );
+                 return false;
+@@ -839,10 +943,27 @@
+                         self.fail(app, run, "初始化通知发送失败", "failed");
+                         return false;
+                     }
+-                    Some(
+-                        json!({"id":2,"method":"thread/start","params":{"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。将最终交付直接写在回答中。","ephemeral":false}}),
+-                    )
+-                }
++                    Some(json!({"id":4,"method":"model/list","params":{"limit":100}}))
++                }
++                4 => match select_model(&message["result"], &mut r.model_cursors) {
++                    Ok(ModelChoice::Selected(model)) => {
++                        r.task.event(
++                            &format!("本次请求 CLI 目录默认模型：{}", model),
++                            "system",
++                            "工作台",
++                        );
++                        changed = true;
++                        Some(thread_request(directory, &model))
++                    }
++                    Ok(ModelChoice::NextPage(cursor)) => Some(
++                        json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}}),
++                    ),
++                    Err(error) => {
++                        drop(r);
++                        self.fail(app, run, &error, "failed");
++                        return false;
++                    }
++                },
+                 2 => {
+                     let thread = &message["result"]["thread"];
+                     let Some(id) = thread["id"].as_str() else {
+@@ -852,6 +973,12 @@
+                     };
+                     r.task.thread_id = Some(id.into());
+                     r.task.root_node();
++                    if let Some(node) = r.task.nodes.iter_mut().find(|n| n.id == id) {
++                        node.model = message["result"]["model"]
++                            .as_str()
++                            .unwrap_or("实际模型未返回")
++                            .into();
++                    }
+                     r.task.event("会话已创建，启动任务", "system", "工作台");
+                     changed = true;
+                     Some(
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -98,7 +98,7 @@
+ 
+         {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">{t.provider==='demo'?'演示':'Codex'} · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p>{t.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(t,a.id,true)}>按建议继续<Check size={14}/></button><button className="text-button" onClick={()=>{select(t);setView('tasks');}}>查看上下文<ArrowUpRight size={13}/></button></div>}</div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
+         {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">演示结果会明确标注</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{t.provider==='demo'?'演示交付':'Codex 输出'}</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>成果正在路上</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
+-        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器预览仅支持演示；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>一个真实根任务；演示可并行。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
++        {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器预览仅支持演示；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>一个真实根任务；演示可并行。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
+         <footer className="page-footer"><span><ShieldCheck size={12}/>{persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit Preview <span>·</span> 把注意力留给重要的事</span></footer>
+       </div>
+     </main>
+--- a/README.md
++++ b/README.md
+@@ -38,6 +38,7 @@
+ - 创建任务，选择调研、编程或写作；点击启动。审批、补充方向、中断、结果预览与导出可交互。
+ - 真正执行需要 Tauri 桌面 App 和已安装、已认证的 Codex CLI。在设置中检查连接，然后创建“本机 Codex”任务并显式点击启动。
+ - 连接检查仅发 initialize，不发 thread/start 或 turn/start，不调用模型。真实任务会消耗 CLI 对应的模型额度。
++- 每次真实启动先读取 `model/list` 的可见默认模型，再显式传给 `thread/start`，避免继承不兼容的模型别名；任务详情显示执行器返回的实际模型。目录不是账号权限保证，调用失败会显示有界、脱敏的错误详情。
+ - 真实模式同一时间只运行一个根任务。CLI 路径优先检查 `~/.local/bin/codex`、`~/.cargo/bin/codex`、Homebrew 安装路径，再使用 PATH。
+ 
+ ## 权限与运行语义
+@@ -69,4 +70,10 @@
+ MACOSX_DEPLOYMENT_TARGET=13.0 cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features
+ ```
+ 
+-完整真实任务、模型用量、子代理事件覆盖和取消外部命令的效果尚需真实运行验证。此原型默认不发起任何模型请求，不包含商业登录集成。
++已验证一次真实最小调用：CLI 目录默认 `gpt-5.6-sol` → 相同实际模型 → `turn/completed` → 回答 `OK`，不调用工具、不重跑用户调研。完整调研任务、模型用量、子代理事件覆盖和取消外部命令的效果尚需真实运行验证。此原型默认不发起任何模型请求，不包含商业登录集成。
++
++手动重现最小真实调用检查（会使用一次模型额度，常规测试默认跳过）：
++
++```sh
++MACOSX_DEPLOYMENT_TARGET=13.0 cargo test --manifest-path src-tauri/Cargo.toml --lib runner::tests::local_minimal_real_turn_with_catalog_default -- --ignored --nocapture
++```

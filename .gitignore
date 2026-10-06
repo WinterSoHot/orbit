@@ -1,0 +1,22 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.log
+
+public/pdfjs/
+
+# Local settings, credentials and generated CI archives.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+Orbit-macos-*.zip
+# Runtime data belongs in AppData, never in source control.
+/workspace.json
+/library.json
+/library-blobs/
+/runs/
+/exports/

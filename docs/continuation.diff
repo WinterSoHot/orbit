@@ -1,0 +1,1679 @@
+--- a/README.md
++++ b/README.md
+@@ -90,3 +90,11 @@
+ 执行结束且已有交付物的任务可点击“归档任务”，从日常工作台和交付列表移入左侧“归档”。归档保留 Agent 历史、运行记录和正文，可查看只读 Markdown、导出交付或确认删除；不能编辑或重新启动。执行器清理未确认时无法归档或删除。删除只移除工作台记录及内嵌正文，Codex 会话、运行目录和已导出的文件仍保留。归档/删除先持久化再提交，失败保留记录，迟到事件不会让已删除任务复活。
+ 
+ 旧快照在加载时仅过滤 provider 为 demo 的任务，不直接重写文件；下次正常保存不再包含演示记录。未知来源或损坏真实记录仍禁止覆盖。
++
++## 通过聊天继续交付
++
++已交付任务底部的“任务对话”保存初始目标、补充信息和交付版本。填写补充要求后点击“发送并继续交付”，续接原 Codex thread 并启动新的 turn；原始目标不变，先前结果（包括本地已保存的编辑）保留，可分别预览、编辑和导出。归档只读，不能继续聊天。重新开始会建立新会话并清空本任务旧交付，界面会提示确认。
++
++每个任务最多保存 10 份交付、10 次交付后补充，每次 2000 字。已接受但初始化失败的补充也保留并计入次数。未知状态不自动续接；外部会话若出现了较新轮次或仍在运行，也停止启动，避免误用上下文。补充历史表示已提交给工作台，不代表模型已经成功处理。
++
++运行中补充会保存原文，并显示待确认、执行器已确认、已拒绝或确认未知。确认响应必须匹配发送时的 run / turn；执行器确认仅表示收到该轮输入，是否采用应在交付中核对。确认未知不自动重发。同一轮的多个最终回答会按 item ID 合并为交付，而非只保留最后一段；输出最多 64k 字符，超限带明确提示。运行中补充最多 20 条。
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,7 @@
+     "dev": "vite --host 127.0.0.1",
+     "build": "tsc --noEmit && vite build",
+     "preview": "vite preview --host 127.0.0.1",
+-    "test": "node --experimental-strip-types --test src/model.test.ts",
++    "test": "node --experimental-strip-types --test src/model.test.ts && node src/TaskChat.render-check.mjs",
+     "tauri": "tauri"
+   },
+   "dependencies": {
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,10 +1,11 @@
+ import { useEffect, useRef, useState } from 'react';
+ import { Activity, Archive, Trash2, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+-import { applyRuntime, isActive, isTerminal, sceneLabels, statusLabels } from './model';
++import { applyRuntime, canContinue, isActive, isTerminal, sceneLabels, statusLabels } from './model';
+ import type { AgentNode, Approval, Artifact, Scene, Status, Task } from './model';
+-import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, archiveTask, deleteTask, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
++import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, archiveTask, deleteTask, continueReal, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+ import type { Doctor } from './bridge';
+ import { Graph } from './Graph';
++import { TaskChat } from './TaskChat';
+ import { AgentOutput, ArtifactEditor } from './ArtifactEditor';
+ 
+ type View='tasks'|'archive'|'attention'|'artifacts'|'settings';
+@@ -20,6 +21,8 @@
+   const [scene,setScene]=useState<Scene|'all'>('all'),[query,setQuery]=useState(''),[taskFilter,setTaskFilter]=useState<'all'|'active'|'completed'>('all');
+   const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState(''),[agentOutput,setAgentOutput]=useState<AgentNode|null>(null);
+   const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
++  const [chatDrafts,setChatDrafts]=useState<Record<string,string>>({});
++  const continuing=useRef(false);
+   const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),deletedIds=useRef(new Set<string>());
+   const visibleTasks=tasks.filter(t=>view==='archive'?t.archived:!t.archived);
+   const task=visibleTasks.find(t=>t.id===selectedId)||visibleTasks[0];
+@@ -46,13 +49,35 @@
+   async function perform(work:()=>Promise<unknown>) {setBusy(true);try{await work();}catch(error){setToast(errorText(error));}finally{setBusy(false);}}
+   function select(t:Task){setSelectedId(t.id);setNodeId(t.nodes[0]?.id||null);setSteer('');}
+   async function launch(target:Task){
++    if(target.artifacts.length&&!window.confirm('重新开始会建立新会话并清空本任务的旧交付。若要保留版本，请在任务对话中发送补充信息。继续重新开始？'))return;
+     await perform(async()=>{
+-      setTasks(current=>current.map(t=>t.id===target.id?{...t,status:'queued',runId:null,approvals:[]}:t));
++      setTasks(current=>current.map(t=>t.id===target.id?{...t,status:'queued',runId:null,supersededRunId:target.runId,approvals:[]}:t));
+       try {const incoming=await startReal(target);setTasks(current=>{const newer=current.find(t=>t.id===incoming.id&&t.runId===incoming.runId&&t.revision>incoming.revision);return [newer||incoming,...current.filter(t=>t.id!==incoming.id)];});select(incoming);}
+       catch(error){setTasks(current=>current.map(t=>t.id===target.id&&t.runId===null?target:t));throw error;}
+     });
+   }
+-  async function sendDirection(){const text=steer.trim();if(!text||!task)return;await perform(()=>steerReal(task.runId!,text));setSteer('');}
++  async function sendDirection(){const text=steer.trim();if(!text||!task||busy)return;await perform(async()=>{await steerReal(task.runId!,text);setSteer('');});}
++  async function continueDelivery(){
++    if(!task||!canContinue(task)||busy||continuing.current||!desktop)return;
++    const target=task,draft=chatDrafts[target.id]||'',text=draft.trim();
++    if(!text)return;
++    continuing.current=true;
++    await perform(async()=>{
++      await saveQueue.current;
++      setTasks(current=>current.map(t=>t.id===target.id?{...t,status:'queued',runId:null,supersededRunId:target.runId,approvals:[]}:t));
++      try {
++        const incoming=await continueReal(target,text);
++        setTasks(current=>current.map(t=>t.id===incoming.id?(t.runId===incoming.runId&&t.revision>incoming.revision?t:incoming):t));
++        setChatDrafts(current=>current[target.id]===draft?{...current,[target.id]:''}:current);
++        setToast(incoming.status==='failed'?'补充已保存，但启动失败；请查看运行记录':'补充已保存，正在续接原会话；已有交付版本保留');
++      } catch(error) {
++        try {const latest=await loadTasks();if(latest.error)throw new Error(latest.error);setTasks(current=>current.map(t=>t.id===target.id?latest.tasks.find(saved=>saved.id===target.id)||t:t));}
++        catch {setTasks(current=>current.map(t=>t.id===target.id&&t.runId===null?target:t));}
++        throw error;
++      }
++    });
++    continuing.current=false;
++  }
+   async function stop(){if(!task)return;await perform(()=>cancelReal(task.runId!));}
+   async function answer(target:Task,id:string,answers:Record<string,string>){await perform(()=>replyReal(target.runId!,id,answers));}
+   async function inspectCli(){setChecking(true);try{setDoctor(await checkCli());}catch(error){setToast(errorText(error));}finally{setChecking(false);}}
+@@ -99,14 +124,15 @@
+         {(view==='tasks'||view==='archive')&&<div className="workbench">
+           <section className="task-panel"><div className="panel-heading"><h2>{view==='archive'?'归档任务':'任务'}<span>{filtered.length}</span></h2>{view!=='archive'&&<button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button>}</div>{view!=='archive'&&<div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div>}<label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} aria-pressed={task?.id===t.id} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>Codex</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>{!visibleTasks.length?'暂无任务':'没有匹配的任务'}</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{!desktop?'浏览器仅预览界面':persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
+           <div className="task-detail">{task?<>
+-            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.archived?'已归档':'Codex · 只读'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&!task.archived&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}{!task.archived&&task.status==='completed'&&task.artifacts.length>0&&<button className="secondary-button compact" disabled={busy} onClick={archive}><Archive size={13}/>归档任务</button>}{task.archived&&<><button className="secondary-button compact" disabled={busy} onClick={exportDelivery}><FileText size={13}/>导出交付</button><button className="secondary-button compact" disabled={busy} onClick={remove}><Trash2 size={13}/>删除任务</button></>}<Badge status={task.status}/>{!task.archived&&(isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||!desktop} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':'新运行'}</button>)}</div></div>
++            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.archived?'已归档':'Codex · 只读'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&!task.archived&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}{!task.archived&&task.status==='completed'&&task.artifacts.length>0&&<button className="secondary-button compact" disabled={busy} onClick={archive}><Archive size={13}/>归档任务</button>}{task.archived&&<><button className="secondary-button compact" disabled={busy} onClick={exportDelivery}><FileText size={13}/>导出交付</button><button className="secondary-button compact" disabled={busy} onClick={remove}><Trash2 size={13}/>删除任务</button></>}<Badge status={task.status}/>{!task.archived&&(isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||!desktop} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':'重新开始'}</button>)}</div></div>
+             <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`运行 ${task.runId.slice(0,8)}`:'尚无运行'}</span></div>
+             {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
+             <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>已观测关系</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
+               <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||(task.provider==='codex'&&node.parentId?(task.archived?'归档前未同步子会话正文。':isTerminal(task.status)?'点击“同步协作”读取子会话正文。':'任务结束后，可同步子会话正文。'):'尚无文本输出。')}</p><div className="inspector-detail-actions">{node.agentPath&&<code>{node.agentPath}</code>}{!!node.detailTurnCount&&<span>子会话历史 · {node.detailTurnCount} 轮输出</span>}{node.detailNotice&&<p>{node.detailNotice}</p>}{node.output&&<button className="secondary-button compact" onClick={()=>setAgentOutput(node)}><FileText size={13}/>{node.outputTruncated?'查看输出':'查看完整输出'}</button>}</div><div className="inspector-foot"><ShieldCheck size={13}/>状态来自执行器事件</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
+             {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p><RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/></div></div>)}
+             <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，执行事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
+-            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>{task.archived?'可预览或导出。':'可预览、编辑或下载。'}</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
++            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>{task.archived?'可预览或导出。':'可预览、编辑或下载。'}</span></div>{task.artifacts.map((a,i)=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>版本 {i+1}<ArrowUpRight size={13}/></button>)}</div>}
++            {(task.artifacts.length>0||!!task.supplements?.length||!!task.directions?.length)&&<TaskChat task={task} draft={chatDrafts[task.id]||''} busy={busy} desktop={desktop} onChange={text=>setChatDrafts(current=>({...current,[task.id]:text}))} onSend={continueDelivery} onOpen={setArtifact}/>}
+           </>:<div className="large-empty"><Bot size={40}/><h2>{view==='archive'?'还没有归档任务':'从一个任务开始'}</h2><p>{view==='archive'?'已交付任务可归档，在这里导出或删除。':desktop?'调研、编程或写作，都可以从这里推进。':'打开 Orbit 桌面 App 后可创建和执行本机 Codex 任务。'}</p>{view!=='archive'&&<button className="primary-button" onClick={()=>setModal(true)}><Plus size={16}/>新建任务</button>}</div>}</div>
+         </div>}
+ 
+--- a/src/TaskChat.render-check.mjs
++++ b/src/TaskChat.render-check.mjs
+@@ -0,0 +1,26 @@
++import assert from 'node:assert/strict';
++import React from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import { createServer } from 'vite';
++
++const server=await createServer({server:{middlewareMode:true,hmr:false,ws:false},appType:'custom'});
++try {
++  const {TaskChat}=await server.ssrLoadModule('/src/TaskChat.tsx');
++  const artifact={id:'v1',name:'v1.md',kind:'markdown',content:'# First version',createdAt:2};
++  const task={id:'task',title:'Test',prompt:'Original goal',scene:'research',provider:'codex',status:'completed',archived:false,createdAt:0,startedAt:0,finishedAt:2,runId:'run',threadId:'thread',turnId:'turn',revision:10,phase:0,nodes:[],events:[],approvals:[],tokens:null,artifacts:[artifact],supplements:[{runId:'run',previousTurnId:'old',text:'More storage details',createdAt:1}],directions:[{id:'direction',runId:'old-run',turnId:'old-turn',text:'Offline first',status:'accepted',createdAt:0.5}]};
++  const props={task,draft:'Update the comparison',busy:false,desktop:true,onChange:()=>{},onSend:()=>{},onOpen:()=>{}};
++  const render=(overrides={})=>renderToStaticMarkup(React.createElement(TaskChat,{...props,...overrides}));
++  const ready=render();
++  assert(ready.includes('More storage details'));
++  assert(ready.includes('Offline first'));
++  assert(ready.includes('执行器已确认'));
++  assert(ready.includes('First version'));
++  assert(ready.includes('发送并继续交付'));
++  assert(!ready.includes('disabled=""'));
++  const archived=render({task:{...task,archived:true}});
++  assert(!archived.includes('<textarea'));
++  assert(!archived.includes('发送并继续交付'));
++  assert(render({task:{...task,status:'running'}}).includes('disabled=""'));
++  assert(render({desktop:false}).includes('disabled=""'));
++  console.log('TaskChat render checks passed: history, confirmations, archive and running/browser guards.');
++} finally { await server.close(); }
+--- a/src/TaskChat.tsx
++++ b/src/TaskChat.tsx
+@@ -0,0 +1,34 @@
++import { useEffect, useRef } from 'react';
++import { MessageCircle, Send, Loader2, FileText } from 'lucide-react';
++import { canContinue, isActive } from './model';
++import type { Artifact, Task } from './model';
++import { MarkdownBody } from './ArtifactEditor';
++
++type Props={task:Task;draft:string;busy:boolean;desktop:boolean;onChange:(text:string)=>void;onSend:()=>void;onOpen:(artifact:Artifact)=>void};
++export function TaskChat({task,draft,busy,desktop,onChange,onSend,onOpen}:Props) {
++  const historyRef=useRef<HTMLDivElement>(null);
++  const supplements=task.supplements||[];
++  useEffect(()=>{const history=historyRef.current;if(history)history.scrollTop=history.scrollHeight;},[task.id,task.artifacts.length,supplements.length,task.directions?.length]);
++  const history=[...supplements.map(s=>({id:s.runId,at:s.createdAt,text:s.text,artifact:null as Artifact|null,status:''})),...(task.directions||[]).map(d=>({id:d.id,at:d.createdAt,text:d.text,artifact:null as Artifact|null,status:({pending:'等待执行器确认',accepted:'执行器已确认 · 请在交付中核对采用情况',rejected:'执行器已拒绝',unknown:'确认未知 · 请勿重复发送'})[d.status]})),...task.artifacts.map(a=>({id:a.id,at:a.createdAt,text:'',artifact:a,status:''}))].sort((a,b)=>a.at-b.at);
++  const available=canContinue(task);
++  const limit=task.artifacts.length>=10||supplements.length>=10;
++  const notice=task.archived?'已归档 · 对话只读':isActive(task.status)?'正在生成下一份交付，请等待本轮结束':limit?'已达到 10 份交付或 10 次补充上限，请新建任务':available?'补充背景、调整要求，继续在原会话中交付':'当前会话无法安全续接，请核对状态后新建任务';
++  return <section className="task-chat" aria-label="任务对话">
++    <div className="panel-heading"><h2><MessageCircle size={15}/>任务对话</h2><span className="subtle">{task.artifacts.length} 份交付版本</span></div>
++    <div className="chat-history" ref={historyRef}>
++      <div className="chat-message user"><span className="chat-label">你 · 初始目标</span><p>{task.prompt}</p></div>
++      {history.map(item=>item.artifact?<div className="chat-message delivery" key={item.id}>
++        <details open={item.id===task.artifacts.at(-1)?.id}><summary><FileText size={14}/><strong>交付版本 {task.artifacts.findIndex(a=>a.id===item.id)+1}</strong><time>{new Date(item.at).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</time></summary><MarkdownBody content={item.artifact.content}/></details>
++        <button className="chat-document-link" onClick={()=>onOpen(item.artifact!)}>打开文档{task.archived?' · 预览 / 导出':' · 预览 / 编辑 / 导出'}</button>
++      </div>:<div key={item.id} className="chat-message user"><span className="chat-label">你 · 补充信息</span><p>{item.text}</p>{item.status&&<small className="chat-label direction-status">{item.status}</small>}</div>)}
++      {isActive(task.status)&&<div className="chat-progress" role="status"><Loader2 className="spin" size={14}/>Codex 正在处理，交付生成后会出现在这里</div>}
++      {(task.status==='failed'||task.status==='interrupted'||task.status==='unknown')&&<p className="chat-attempt-notice">本轮{task.status==='failed'?'失败':task.status==='interrupted'?'已中断':'结果需核对'}，已有交付版本保留。补充记录表示已提交给工作台，不代表模型已成功处理。</p>}
++    </div>
++    <div className="chat-composer-area"><p className="chat-composer-notice">{notice}</p>
++      {!task.archived&&<form className="chat-composer" onSubmit={event=>{event.preventDefault();if(available&&!busy&&desktop&&draft.trim())onSend();}}>
++        <textarea aria-label="补充信息继续交付" placeholder="例如：预算控制在 500 元以内，补充比较表，并更新结论…" rows={3} maxLength={2000} value={draft} disabled={busy||!available||!desktop} onChange={event=>onChange(event.target.value)}/>
++        <div><span>{supplements.length}/10 次补充 · {draft.length}/2000 字</span><button className="primary-button compact" disabled={busy||!desktop||!available||!draft.trim()}>{busy?<Loader2 size={14} className="spin"/>:<Send size={14}/>}发送并继续交付</button></div>
++      </form>}
++    </div>
++  </section>;
++}
+--- a/src/bridge.ts
++++ b/src/bridge.ts
+@@ -29,3 +29,5 @@
+ 
+ export const archiveTask=(taskId:string)=>invoke<Task>('archive_task',{taskId});
+ export const deleteTask=(taskId:string)=>invoke('delete_task',{taskId});
++
++export const continueReal=(task:Task,text:string)=>invoke<Task>('continue_task',{taskId:task.id,revision:task.revision,runId:task.runId,turnId:task.turnId,text});
+--- a/src/model.test.ts
++++ b/src/model.test.ts
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { applyRuntime } from './model.ts';
++import { applyRuntime, canContinue } from './model.ts';
+ import type { Task } from './model.ts';
+ 
+ function fixture(): Task {
+@@ -27,3 +27,20 @@
+   assert.equal(next.archived,true);
+   assert.equal(next.artifacts[0].content,'saved delivery');
+ });
++
++test('pending continuation rejects old run events and accepts new delivery', () => {
++  const old={...fixture(),status:'completed' as const};
++  const pending={...old,status:'queued' as const,runId:null,supersededRunId:old.runId};
++  assert.equal(applyRuntime(pending,{...old,revision:100}).runId,null);
++  assert.equal(applyRuntime(pending,{...old,runId:'run-2',status:'running',revision:2}).runId,'run-2');
++});
++
++test('chat continuation requires an ended session and reserves the next delivery slot', () => {
++  const task={...fixture(),status:'completed' as const,threadId:'thread',artifacts:[{id:'doc',name:'v1.md',kind:'markdown',content:'result',createdAt:0}]};
++  assert.equal(canContinue(task),true);
++  assert.equal(canContinue({...task,status:'running'}),false);
++  assert.equal(canContinue({...task,status:'unknown'}),false);
++  assert.equal(canContinue({...task,archived:true}),false);
++  assert.equal(canContinue({...task,artifacts:Array(10).fill(task.artifacts[0])}),false);
++  assert.equal(canContinue({...task,status:'failed',turnId:null,supplements:[{runId:'run-1',previousTurnId:'last-known',text:'more',createdAt:0}]}),true);
++});
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -5,15 +5,21 @@
+ export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
+ export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
+ export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
+-export interface Task { id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
++export interface Supplement { runId:string; previousTurnId:string; text:string; createdAt:number }
++export interface Direction { id:string; runId:string; turnId:string; text:string; status:'pending'|'accepted'|'rejected'|'unknown'; createdAt:number }
++export interface Task { directions?:Direction[]; supplements?:Supplement[]; supersededRunId?:string|null; id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+ export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
+ export const sceneLabels: Record<Scene, string> = { research: '调研', coding: '编程', writing: '写作' };
+ export const isActive = (status: Status) => ['running', 'approval', 'cancelling'].includes(status);
+ export const isTerminal = (status: Status) => ['completed', 'failed', 'interrupted'].includes(status);
+ 
+ export function applyRuntime(task: Task, incoming: Task): Task {
+-  if(task.archived || task.id!==incoming.id || task.provider!=='codex' || incoming.provider!=='codex' || (task.runId!==null && task.runId!==incoming.runId) || incoming.revision<=task.revision) return task;
++  if(task.supersededRunId===incoming.runId || task.archived || task.id!==incoming.id || task.provider!=='codex' || incoming.provider!=='codex' || (task.runId!==null && task.runId!==incoming.runId) || incoming.revision<=task.revision) return task;
+   if(isTerminal(task.status) && incoming.status!==task.status) return task;
+   return incoming;
+ }
+ 
++
++export function canContinue(task:Task):boolean {
++  return !task.archived && isTerminal(task.status) && task.artifacts.length>0 && !!task.threadId && !!task.runId && !!(task.turnId || task.supplements?.at(-1)?.previousTurnId) && task.artifacts.length<10 && (task.supplements?.length||0)<10;
++}
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -448,3 +448,29 @@
+ .new-task-executor { display:flex; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:8px; }
+ .new-task-executor strong { display:block; font-size:13px; }
+ .new-task-executor small { display:block; margin-top:5px; color:var(--muted); font-size:11px; }
++
++/* Conversation follows the existing document and inspector typography. */
++.task-chat { margin: 0 22px 24px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: white; }
++.chat-history { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 16px; max-height: 580px; overflow: auto; }
++.chat-message { border-radius: 12px; padding: 13px 16px; font-size: 13px; line-height: 1.65; }
++.chat-message.user { align-self: flex-end; width: min(85%, 650px); background: #edf4ff; color: #283f66; }
++.chat-label { display: block; font-size: 11px; color: #637895; margin-bottom: 5px; }
++.chat-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
++.chat-message.delivery { border: 1px solid #e4e7ee; background: #fbfcfe; }
++.chat-message summary { cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12px; }
++.chat-message summary time { margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 400; }
++.chat-message summary::after { content: '展开'; color: var(--muted); font-size: 11px; }
++.chat-message details[open] summary::after { content: '收起'; }
++.chat-message .markdown-body { height: auto; min-height: 0; padding: 16px 0 4px; max-height: 360px; overflow: auto; font-size: 13px; }
++.chat-document-link { margin-top: 10px; padding: 0; color: var(--blue-ink); background: none; font-size: 11px; text-align: left; }
++.chat-progress, .chat-attempt-notice { color: var(--muted); font-size: 12px; line-height: 1.6; }
++.chat-progress { display: flex; align-items: center; gap: 8px; }
++.chat-composer-area { border-top: 1px solid var(--border); padding: 16px 20px; background: #fafbfd; }
++.chat-composer-notice { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
++.chat-composer { border: 1px solid #dadde5; border-radius: 10px; background: white; overflow: hidden; }
++.chat-composer:focus-within { border-color: var(--blue); }
++.chat-composer textarea { display: block; resize: vertical; width: 100%; min-height: 80px; max-height: 240px; padding: 12px 14px; border: 0; outline: none; background: transparent; font-size: 13px; line-height: 1.6; }
++.chat-composer textarea:disabled { color: var(--muted); }
++.chat-composer > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px 10px 14px; }
++.chat-composer > div > span { color: var(--muted); font-size: 10px; }
++@media (max-width: 700px) { .task-chat { margin-inline: 16px; } .chat-history, .chat-composer-area { padding-inline: 12px; } .chat-message.user { width: 95%; } .chat-composer > div { flex-wrap: wrap; } }
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -73,6 +73,23 @@
+             .map_err(|_| "启动进程失败".to_string())?
+     }
+     #[tauri::command]
++    async fn continue_task(
++        app: AppHandle,
++        runtime: State<'_, Runtime>,
++        task_id: String,
++        revision: u64,
++        run_id: Option<String>,
++        turn_id: Option<String>,
++        text: String,
++    ) -> Result<Task, String> {
++        let owned = runtime.inner().clone();
++        tauri::async_runtime::spawn_blocking(move || {
++            owned.continue_task(app, task_id, revision, run_id, turn_id, text)
++        })
++        .await
++        .map_err(|_| "续接进程失败".to_string())?
++    }
++    #[tauri::command]
+     fn steer_run(
+         app: AppHandle,
+         runtime: State<Runtime>,
+@@ -128,6 +145,7 @@
+                 doctor,
+                 create_task,
+                 start_run,
++                continue_task,
+                 steer_run,
+                 interrupt_run,
+                 reply_input
+--- a/src-tauri/src/model.rs
++++ b/src-tauri/src/model.rs
+@@ -8,6 +8,16 @@
+         .as_millis() as u64
+ }
+ 
++pub const OUTPUT_LIMIT: usize = 64000;
++pub const ANSWER_LIMIT: usize = 20;
++const ANSWER_SEPARATOR: &str = "\n\n---\n\n";
++const TRUNCATED_NOTICE: &str = "\n\n> 输出超过大小或条数上限，内容已截断。";
++pub fn answer_budget() -> usize {
++    OUTPUT_LIMIT
++        - (ANSWER_LIMIT - 1) * ANSWER_SEPARATOR.chars().count()
++        - TRUNCATED_NOTICE.chars().count()
++}
++
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct Node {
+@@ -56,6 +66,30 @@
+     pub name: String,
+     pub kind: String,
+     pub content: String,
++    pub created_at: u64,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct AnswerItem {
++    pub id: String,
++    pub text: String,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Direction {
++    pub id: String,
++    pub run_id: String,
++    pub turn_id: String,
++    pub text: String,
++    pub status: String,
++    pub created_at: u64,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Supplement {
++    pub run_id: String,
++    pub previous_turn_id: String,
++    pub text: String,
+     pub created_at: u64,
+ }
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+@@ -84,6 +118,12 @@
+     pub approvals: Vec<Approval>,
+     pub artifacts: Vec<Artifact>,
+     pub tokens: Option<u64>,
++    #[serde(default)]
++    pub supplements: Vec<Supplement>,
++    #[serde(default)]
++    pub directions: Vec<Direction>,
++    #[serde(default)]
++    pub answer_items: Vec<AnswerItem>,
+ }
+ impl Task {
+     pub fn new(title: String, prompt: String, scene: String) -> Self {
+@@ -109,7 +149,71 @@
+             approvals: vec![],
+             artifacts: vec![],
+             tokens: None,
+-        }
++            supplements: vec![],
++            directions: vec![],
++            answer_items: vec![],
++        }
++    }
++    pub fn begin_run(&mut self, preserve: bool) {
++        self.status = "running".into();
++        self.started_at = Some(now());
++        self.finished_at = None;
++        self.run_id = Some(uuid::Uuid::new_v4().to_string());
++        self.turn_id = None;
++        self.nodes.clear();
++        self.answer_items.clear();
++        self.agent_activity_ids.clear();
++        self.approvals.clear();
++        self.tokens = None;
++        if !preserve {
++            self.thread_id = None;
++            self.artifacts.clear();
++            self.supplements.clear();
++            self.directions.clear();
++        }
++        self.event("正在连接本机 Codex；文件沙箱只读", "system", "工作台");
++    }
++    pub fn continued(
++        &self,
++        revision: u64,
++        run: &Option<String>,
++        turn: &Option<String>,
++        text: &str,
++    ) -> Result<(Self, String), String> {
++        if self.revision != revision || &self.run_id != run || &self.turn_id != turn {
++            return Err("任务已更新，请核对当前交付后重新发送".into());
++        }
++        if self.archived
++            || !self.terminal()
++            || self.artifacts.is_empty()
++            || self.thread_id.as_deref().is_none_or(str::is_empty)
++            || self.run_id.is_none()
++        {
++            return Err("仅未归档且已结束的交付任务可以继续；未知状态需先核对".into());
++        }
++        if text.trim().is_empty() || text.chars().count() > 2000 {
++            return Err("补充信息应为 1–2000 字".into());
++        }
++        if self.artifacts.len() >= 10 || self.supplements.len() >= 10 {
++            return Err("已达到 10 份交付或 10 次补充上限；请新建任务，历史将保留".into());
++        }
++        let anchor = self
++            .turn_id
++            .as_ref()
++            .or_else(|| self.supplements.last().map(|s| &s.previous_turn_id))
++            .filter(|id| !id.is_empty())
++            .ok_or("缺少可核对的上一轮标识，请新建任务")?
++            .clone();
++        let mut next = self.clone();
++        next.begin_run(true);
++        next.supplements.push(Supplement {
++            run_id: next.run_id.clone().unwrap(),
++            previous_turn_id: anchor.clone(),
++            text: text.trim().into(),
++            created_at: now(),
++        });
++        next.event("补充信息已保存，正在续接原会话", "system", "工作台");
++        Ok((next, anchor))
+     }
+     pub fn terminal(&self) -> bool {
+         matches!(self.status.as_str(), "completed" | "failed" | "interrupted")
+@@ -117,12 +221,89 @@
+     pub fn recover(&mut self) {
+         if matches!(self.status.as_str(), "running" | "approval" | "cancelling") {
+             self.status = "unknown".into();
++            self.unconfirm_directions();
+             self.approvals.clear();
+             self.revision += 1;
+             for node in &mut self.nodes {
+                 if matches!(node.status.as_str(), "running" | "approval" | "cancelling") {
+                     node.status = "unknown".into();
+                 }
++            }
++        }
++    }
++    pub fn unconfirm_directions(&mut self) {
++        for direction in &mut self.directions {
++            if direction.status == "pending" {
++                direction.status = "unknown".into();
++            }
++        }
++    }
++    pub fn collect_answer(&mut self, id: &str, value: &str) {
++        use std::hash::{Hash, Hasher};
++        let id = if id.is_empty() {
++            let mut hash = std::collections::hash_map::DefaultHasher::new();
++            value.hash(&mut hash);
++            format!("legacy-{:x}", hash.finish())
++        } else {
++            id.chars().take(200).collect()
++        };
++        let existing = self.answer_items.iter().position(|item| item.id == id);
++        if existing.is_none() && self.answer_items.len() >= ANSWER_LIMIT {
++            if let Some(root) = self.nodes.first_mut() {
++                root.output_truncated = true;
++            }
++            return;
++        }
++        let used: usize = self
++            .answer_items
++            .iter()
++            .enumerate()
++            .filter(|(i, _)| Some(*i) != existing)
++            .map(|(_, item)| item.text.chars().count())
++            .sum();
++        let remaining = answer_budget().saturating_sub(used);
++        if existing.is_none() && remaining == 0 {
++            if let Some(root) = self.nodes.first_mut() {
++                root.output_truncated = true;
++            }
++            self.refresh_answer();
++            return;
++        }
++        let text: String = value.chars().take(remaining).collect();
++        if value.chars().count() > remaining {
++            if let Some(root) = self.nodes.first_mut() {
++                root.output_truncated = true;
++            }
++        }
++        let item = AnswerItem { id, text };
++        if let Some(i) = existing {
++            self.answer_items[i] = item;
++        } else {
++            self.answer_items.push(item);
++        }
++        self.refresh_answer();
++    }
++    pub fn refresh_answer(&mut self) {
++        if self.answer_items.is_empty() {
++            return;
++        }
++        if let Some(root) = self.nodes.first_mut() {
++            root.output = self
++                .answer_items
++                .iter()
++                .map(|item| item.text.as_str())
++                .collect::<Vec<_>>()
++                .join(ANSWER_SEPARATOR);
++            if root.output.chars().count() > OUTPUT_LIMIT {
++                root.output_truncated = true;
++            }
++            if root.output_truncated {
++                root.output = root
++                    .output
++                    .chars()
++                    .take(OUTPUT_LIMIT - TRUNCATED_NOTICE.chars().count())
++                    .collect();
++                root.output.push_str(TRUNCATED_NOTICE);
+             }
+         }
+     }
+@@ -163,3 +344,59 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod continuation_tests {
++    use super::*;
++    #[test]
++    fn continuation_preserves_edited_versions_and_rejects_stale_or_full_tasks() {
++        let mut task = Task::new("test".into(), "original question".into(), "research".into());
++        task.status = "completed".into();
++        task.thread_id = Some("thread".into());
++        task.turn_id = Some("first-turn".into());
++        task.artifacts.push(Artifact {
++            id: "first-result".into(),
++            name: "first.md".into(),
++            kind: "markdown".into(),
++            content: "edited delivery".into(),
++            created_at: 0,
++        });
++        let run = task.run_id.clone();
++        assert!(task
++            .continued(task.revision + 1, &run, &task.turn_id, "more")
++            .is_err());
++        let (next, anchor) = task
++            .continued(task.revision, &run, &task.turn_id, "  more information  ")
++            .unwrap();
++        assert_eq!(anchor, "first-turn");
++        assert_eq!(next.thread_id.as_deref(), Some("thread"));
++        assert_ne!(next.run_id, task.run_id);
++        assert_eq!(next.turn_id, None);
++        assert_eq!(next.prompt, "original question");
++        assert_eq!(next.artifacts[0].content, "edited delivery");
++        assert_eq!(next.supplements[0].text, "more information");
++        assert!(next
++            .continued(next.revision, &next.run_id, &next.turn_id, "duplicate")
++            .is_err());
++        let mut failed = next;
++        failed.status = "failed".into();
++        let (_, retry_anchor) = failed
++            .continued(
++                failed.revision,
++                &failed.run_id,
++                &failed.turn_id,
++                "retry explicitly",
++            )
++            .unwrap();
++        assert_eq!(retry_anchor, "first-turn");
++        task.archived = true;
++        assert!(task
++            .continued(task.revision, &run, &task.turn_id, "more")
++            .is_err());
++        task.archived = false;
++        task.artifacts = vec![task.artifacts[0].clone(); 10];
++        assert!(task
++            .continued(task.revision, &run, &task.turn_id, "more")
++            .is_err());
++    }
++}
+--- a/src-tauri/src/protocol.rs
++++ b/src-tauri/src/protocol.rs
+@@ -28,6 +28,34 @@
+ }
+ pub fn thread_request(directory: &std::path::Path, model: &str) -> Value {
+     serde_json::json!({"id":2,"method":"thread/start","params":{"model":model,"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。将最终交付直接写在回答中。","ephemeral":false}})
++}
++pub fn resume_request(thread: &str, model: &str) -> Value {
++    let mut request = thread_request(std::path::Path::new("/"), model);
++    request["method"] = serde_json::json!("thread/resume");
++    let params = request["params"].as_object_mut().unwrap();
++    params.remove("cwd");
++    params.remove("ephemeral");
++    params.insert("threadId".into(), serde_json::json!(thread));
++    request
++}
++pub fn validate_resume(thread: &Value, expected: &str, previous_turn: &str) -> Result<(), String> {
++    let last = thread["turns"].as_array().and_then(|turns| turns.last());
++    if thread["id"] != expected
++        || thread["status"]["type"] != "idle"
++        || last.is_none_or(|turn| {
++            turn["id"] != previous_turn
++                || !matches!(
++                    turn["status"].as_str(),
++                    Some("completed" | "failed" | "interrupted")
++                )
++        })
++    {
++        return Err("原会话状态或最后一轮已变化，已停止续接；请核对 Codex 会话后新建任务".into());
++    }
++    Ok(())
++}
++pub fn turn_request(thread: &str, input: &str) -> Value {
++    serde_json::json!({"id":3,"method":"turn/start","params":{"threadId":thread,"input":[{"type":"text","text":input}],"sandboxPolicy":{"type":"readOnly"}}})
+ }
+ // Only error.message is read; never persist raw protocol payloads or stderr.
+ pub fn error_message(error: &Value) -> String {
+@@ -317,7 +345,7 @@
+     match method {
+         "turn/started" if thread == root => {
+             let id = text(&p["turn"], "id");
+-            if id.is_empty() {
++            if id.is_empty() || task.turn_id.as_deref().is_some_and(|known| known != id) {
+                 return false;
+             }
+             task.turn_id = Some(id.into());
+@@ -338,6 +366,8 @@
+             .into();
+             task.finished_at = Some(now());
+             task.approvals.clear();
++            task.unconfirm_directions();
++            task.refresh_answer();
+             if let Some(n) = task.nodes.iter_mut().find(|n| n.id == root) {
+                 n.status = task.status.clone();
+                 n.summary = match status {
+@@ -363,13 +393,14 @@
+                 if !content.is_empty() {
+                     task.artifacts.push(Artifact {
+                         id: format!("{}-result", task.run_id.as_deref().unwrap_or("run")),
+-                        name: "codex-result.md".into(),
++                        name: format!("codex-result-v{}.md", task.artifacts.len() + 1),
+                         kind: "markdown".into(),
+                         content,
+                         created_at: now(),
+                     });
+                 }
+             }
++            task.answer_items.clear();
+             task.event(
+                 if status == "completed" {
+                     "本轮执行结束，输出等待验收"
+@@ -392,8 +423,14 @@
+             let item = &p["item"];
+             match text(item, "type") {
+                 "agentMessage" if method == "item/completed" => {
+-                    if let Some(n) = task.nodes.iter_mut().find(|n| n.id == thread) {
+-                        n.output = text(item, "text").chars().take(64000).collect();
++                    if thread == root
++                        && matches!(item["phase"].as_str(), None | Some("final_answer"))
++                    {
++                        task.collect_answer(text(item, "id"), text(item, "text"));
++                    } else if thread != root || task.answer_items.is_empty() {
++                        if let Some(n) = task.nodes.iter_mut().find(|n| n.id == thread) {
++                            n.output = text(item, "text").chars().take(64000).collect();
++                        }
+                     }
+                     task.revision += 1;
+                 }
+@@ -754,6 +791,65 @@
+         task
+     }
+     #[test]
++    fn final_answer_aggregation_is_idempotent_bounded_and_not_polluted_by_deltas() {
++        let mut task = fixture();
++        let answer = serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"same","type":"agentMessage","text":"legacy answer"}}});
++        project(&mut task, &answer);
++        project(&mut task, &answer);
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"old","item":{"id":"old","type":"agentMessage","text":"old poison"}}}),
++        );
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"root","turnId":"turn-1","delta":"stream poison"}}),
++        );
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"comment","type":"agentMessage","phase":"commentary","text":"commentary poison"}}}),
++        );
++        project(
++            &mut task,
++            &serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"completed"}}}),
++        );
++        assert_eq!(task.artifacts[0].content, "legacy answer");
++        assert!(task.answer_items.is_empty());
++        let mut task = fixture();
++        task.root_node();
++        task.collect_answer("large", &"中".repeat(65000));
++        task.collect_answer("large", &"中".repeat(65000));
++        for i in 0..25 {
++            task.collect_answer(&format!("item-{i}"), "extra");
++        }
++        task.refresh_answer();
++        assert!(task.nodes[0].output.chars().count() <= 64000);
++        assert!(task.nodes[0].output_truncated);
++        assert!(task.nodes[0].output.ends_with("内容已截断。"));
++        task.begin_run(true);
++        assert!(task.answer_items.is_empty());
++        assert!(task.nodes.is_empty());
++    }
++    #[test]
++    fn two_final_answers_in_a_steered_turn_are_both_delivered() {
++        let mut task = fixture();
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"answer-1","type":"agentMessage","phase":"final_answer","text":"original complete plan"}}}),
++        );
++        project(
++            &mut task,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn-1","item":{"id":"answer-2","type":"agentMessage","phase":"final_answer","text":"additional storage design"}}}),
++        );
++        project(
++            &mut task,
++            &serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"completed"}}}),
++        );
++        assert!(task.artifacts[0].content.contains("original complete plan"));
++        assert!(task.artifacts[0]
++            .content
++            .contains("additional storage design"));
++    }
++    #[test]
+     fn catalog_default_is_explicit_and_hidden_models_are_not_selected() {
+         let mut cursors = Vec::new();
+         let choice = select_model(&json!({"data":[{"model":"hidden","isDefault":true,"hidden":true},{"model":"catalog-default","isDefault":true,"hidden":false}]}), &mut cursors).unwrap();
+--- a/src-tauri/src/runner.rs
++++ b/src-tauri/src/runner.rs
+@@ -1,8 +1,8 @@
+ use crate::{
+     model::{now, Approval, Task},
+     protocol::{
+-        error_message, observed_agent_nodes, project, read_message, select_model, thread_request,
+-        AgentHistory, AgentRead, ModelChoice,
++        error_message, observed_agent_nodes, project, read_message, resume_request, select_model,
++        thread_request, turn_request, validate_resume, AgentHistory, AgentRead, ModelChoice,
+     },
+     store::Store,
+ };
+@@ -19,6 +19,13 @@
+ };
+ use tauri::{AppHandle, Emitter};
+ 
++#[derive(PartialEq)]
++enum Startup {
++    Connecting,
++    AwaitingTurn,
++    Running,
++}
++
+ struct Run {
+     task: Task,
+     child: OwnedChild,
+@@ -29,9 +36,149 @@
+     model_cursors: Vec<String>,
+     closed: bool,
+     last_emit: Instant,
++    resume_turn: Option<String>,
++    startup: Startup,
++    buffered: Vec<Value>,
++    buffered_bytes: usize,
+ }
+ 
+ impl Run {
++    fn thread_request(&self, directory: &std::path::Path, model: &str) -> Value {
++        match &self.resume_turn {
++            Some(_) => resume_request(self.task.thread_id.as_deref().unwrap(), model),
++            None => thread_request(directory, model),
++        }
++    }
++    fn start_turn(&mut self, result: &Value) -> Result<Value, String> {
++        let thread = &result["thread"];
++        let id = thread["id"]
++            .as_str()
++            .filter(|id| !id.is_empty())
++            .ok_or("执行器未返回有效 thread ID")?;
++        if let Some(anchor) = &self.resume_turn {
++            validate_resume(thread, self.task.thread_id.as_deref().unwrap(), anchor)?;
++        }
++        self.task.thread_id = Some(id.into());
++        self.task.root_node();
++        self.task.nodes[0].model = result["model"].as_str().unwrap_or("实际模型未返回").into();
++        let text = if self.resume_turn.is_some() {
++            &self.task.supplements.last().unwrap().text
++        } else {
++            &self.task.prompt
++        };
++        let request = turn_request(id, text);
++        self.task.event(
++            if self.resume_turn.is_some() {
++                "原会话已续接，发送补充信息"
++            } else {
++                "会话已创建，启动任务"
++            },
++            "system",
++            "工作台",
++        );
++        self.startup = Startup::AwaitingTurn;
++        Ok(request)
++    }
++    fn accept_turn(&mut self, result: &Value) -> Result<Vec<Value>, String> {
++        let id = result["turn"]["id"]
++            .as_str()
++            .filter(|id| !id.is_empty())
++            .ok_or("执行器未返回有效 turn ID")?;
++        if self.startup != Startup::AwaitingTurn || self.resume_turn.as_deref() == Some(id) {
++            return Err("新一轮标识无效，执行结果需核对".into());
++        }
++        self.task.turn_id = Some(id.into());
++        self.task.revision += 1;
++        self.startup = Startup::Running;
++        self.buffered_bytes = 0;
++        Ok(std::mem::take(&mut self.buffered))
++    }
++    fn defer_notification(&mut self, message: &Value) -> Result<bool, String> {
++        if message.get("method").is_none() || self.startup == Startup::Running {
++            return Ok(false);
++        }
++        if self.startup == Startup::Connecting {
++            return Ok(true);
++        }
++        let bytes = message.to_string().len();
++        if self.buffered.len() >= 128 || self.buffered_bytes + bytes > crate::protocol::MAX_MESSAGE
++        {
++            return Err("启动期间事件超过缓冲上限，执行结果需核对".into());
++        }
++        self.buffered_bytes += bytes;
++        self.buffered.push(message.clone());
++        Ok(true)
++    }
++    fn direction_request(&self, text: &str) -> Result<(Task, Value), String> {
++        if text.trim().is_empty() || text.chars().count() > 2000 {
++            return Err("补充方向应为 1–2000 字".into());
++        }
++        if self.closed
++            || self.startup != Startup::Running
++            || !matches!(self.task.status.as_str(), "running" | "approval")
++        {
++            return Err("运行未开始、已结束或正在中断".into());
++        }
++        let turn = self.task.turn_id.as_deref().ok_or("任务尚未开始")?;
++        let thread = self.task.thread_id.as_deref().ok_or("会话未创建")?;
++        if self.task.directions.len() >= 20 {
++            return Err("已达到 20 条运行中补充上限，请等待交付后继续".into());
++        }
++        if self.task.directions.iter().any(|d| {
++            Some(d.run_id.as_str()) == self.task.run_id.as_deref()
++                && d.turn_id == turn
++                && d.text == text.trim()
++                && matches!(d.status.as_str(), "pending" | "unknown")
++        }) {
++            return Err("相同补充仍待确认，请先核对当前交付，勿重复发送".into());
++        }
++        let mut task = self.task.clone();
++        task.directions.push(crate::model::Direction {
++            id: format!("{}:{}", task.run_id.as_deref().unwrap(), self.next_id),
++            run_id: task.run_id.clone().unwrap(),
++            turn_id: turn.into(),
++            text: text.trim().into(),
++            status: "pending".into(),
++            created_at: now(),
++        });
++        task.event("补充正文已保存，等待执行器确认", "input", "你");
++        let input = format!(
++            "请结合本轮原始目标处理以下补充，并在最终交付中体现：\n{}",
++            text.trim()
++        );
++        Ok((
++            task,
++            json!({"id":self.next_id,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":input}]}}),
++        ))
++    }
++    fn confirm_control(&mut self, id: u64, result: &Value) -> bool {
++        let Some(kind) = self.controls.remove(&id) else {
++            return false;
++        };
++        let key = format!("{}:{}", self.task.run_id.as_deref().unwrap_or_default(), id);
++        if let Some(direction) = self.task.directions.iter_mut().find(|d| d.id == key) {
++            let accepted = Some(direction.run_id.as_str()) == self.task.run_id.as_deref()
++                && Some(direction.turn_id.as_str()) == self.task.turn_id.as_deref()
++                && result["turnId"].as_str() == Some(direction.turn_id.as_str());
++            direction.status = if accepted { "accepted" } else { "unknown" }.into();
++            self.task.event(
++                if accepted {
++                    "执行器已确认本轮补充；请在交付中核对采用情况"
++                } else {
++                    "补充确认轮次不匹配，请核对交付，勿重复发送"
++                },
++                "system",
++                "工作台",
++            );
++        } else {
++            self.task.event(
++                &format!("{}请求已接收；执行结果以状态事件为准", kind),
++                "system",
++                "工作台",
++            );
++        }
++        true
++    }
+     fn idle(&self) -> bool {
+         self.closed && self.child.stopped
+     }
+@@ -39,6 +186,10 @@
+         let Some(label) = self.controls.remove(&id) else {
+             return false;
+         };
++        let key = format!("{}:{}", self.task.run_id.as_deref().unwrap_or_default(), id);
++        if let Some(direction) = self.task.directions.iter_mut().find(|d| d.id == key) {
++            direction.status = "rejected".into();
++        }
+         self.task.event(
+             &format!("{}请求被执行器拒绝；继续等待任务状态", label),
+             "error",
+@@ -145,6 +296,230 @@
+         );
+     }
+     #[test]
++    #[ignore = "explicit two-turn inference check using own test thread, no tools or user task"]
++    fn local_continuation_with_real_cli() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-real-continuation-{}", uuid::Uuid::new_v4()));
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = Task::new(
++            "Continuation verification".into(),
++            "Reply exactly FIRST_OK. Do not use tools or spawn agents.".into(),
++            "writing".into(),
++        );
++        for round in 0..2 {
++            let resume_turn = if round == 1 {
++                let original_thread = task.thread_id.clone();
++                let original_run = task.run_id.clone();
++                let (next, anchor) = store
++                    .continue_task(
++                        &task.id,
++                        task.revision,
++                        &task.run_id,
++                        &task.turn_id,
++                        "Reply exactly SECOND_OK. Do not use tools or spawn agents.",
++                    )
++                    .unwrap();
++                assert_eq!(next.thread_id, original_thread);
++                assert_ne!(next.run_id, original_run);
++                task = next;
++                Some(anchor)
++            } else {
++                store.save_task(task.clone()).unwrap();
++                None
++            };
++            let mut child = OwnedChild::new(command().current_dir(&directory).spawn().unwrap());
++            let input = child.child.stdin.take().unwrap();
++            let output = child.child.stdout.take().unwrap();
++            let mut stderr = child.child.stderr.take().unwrap();
++            thread::spawn(move || {
++                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
++            });
++            let (tx, rx) = mpsc::sync_channel(128);
++            thread::spawn(move || {
++                let mut reader = BufReader::new(output);
++                loop {
++                    let result = read_message(&mut reader);
++                    let done = !matches!(&result, Ok(Some(_)));
++                    if tx.send(result).is_err() || done {
++                        break;
++                    }
++                }
++            });
++            let mut run = Run {
++                task,
++                child,
++                input,
++                pending: HashMap::new(),
++                controls: HashMap::new(),
++                next_id: 100,
++                model_cursors: Vec::new(),
++                closed: false,
++                last_emit: Instant::now(),
++                resume_turn,
++                startup: Startup::Connecting,
++                buffered: Vec::new(),
++                buffered_bytes: 0,
++            };
++            send(&mut run.input, &initialize()).unwrap();
++            let deadline = Instant::now() + Duration::from_secs(60);
++            while !run.task.terminal() {
++                let message = rx
++                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
++                    .expect("real continuation timeout")
++                    .unwrap()
++                    .expect("CLI closed before completion");
++                if message.get("error").is_some() {
++                    panic!("{}", error_message(&message["error"]));
++                }
++                if run.defer_notification(&message).unwrap() {
++                    continue;
++                }
++                if message.get("method").is_some() && message.get("id").is_some() {
++                    send(&mut run.input, &json!({"id":message["id"],"error":{"code":-32601,"message":"No tools in continuation verification"}})).unwrap();
++                } else if let Some(id) = message["id"].as_u64() {
++                    let request = match id {
++                        1 => {
++                            send(&mut run.input, &json!({"method":"initialized"})).unwrap();
++                            Some(json!({"id":4,"method":"model/list","params":{"limit":100}}))
++                        }
++                        4 => {
++                            match select_model(&message["result"], &mut run.model_cursors).unwrap()
++                            {
++                                ModelChoice::Selected(model) => {
++                                    Some(run.thread_request(&directory, &model))
++                                }
++                                ModelChoice::NextPage(cursor) => Some(
++                                    json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}}),
++                                ),
++                            }
++                        }
++                        2 => Some(run.start_turn(&message["result"]).unwrap()),
++                        3 => {
++                            for deferred in run.accept_turn(&message["result"]).unwrap() {
++                                project(&mut run.task, &deferred);
++                            }
++                            None
++                        }
++                        _ => None,
++                    };
++                    if let Some(request) = request {
++                        send(&mut run.input, &request).unwrap();
++                    }
++                } else {
++                    project(&mut run.task, &message);
++                }
++            }
++            assert_eq!(run.task.status, "completed");
++            let expected = if round == 0 { "FIRST_OK" } else { "SECOND_OK" };
++            assert_eq!(run.task.artifacts.last().unwrap().content.trim(), expected);
++            run.child.stop().unwrap();
++            task = run.task;
++            store.save_existing_task(task.clone()).unwrap().unwrap();
++        }
++        assert_eq!(task.artifacts.len(), 2);
++        assert_eq!(task.artifacts[0].content.trim(), "FIRST_OK");
++        assert_ne!(task.artifacts[0].id, task.artifacts[1].id);
++        assert_ne!(
++            task.turn_id.as_deref(),
++            Some(task.supplements[0].previous_turn_id.as_str())
++        );
++        std::fs::remove_dir_all(directory).unwrap();
++        println!("Confirmed actual CLI: original thread resumed, new turn completed, FIRST_OK and SECOND_OK retained.");
++    }
++    #[test]
++    fn startup_buffer_overflow_is_explicit_and_pending_directions_recover_unknown() {
++        let mut run = fake_run();
++        run.startup = Startup::AwaitingTurn;
++        for _ in 0..128 {
++            assert!(run
++                .defer_notification(&json!({"method":"turn/started","params":{}}))
++                .unwrap());
++        }
++        assert!(run
++            .defer_notification(&json!({"method":"turn/started","params":{}}))
++            .is_err());
++        run.startup = Startup::Running;
++        let (mut candidate, _) = run.direction_request("pending direction").unwrap();
++        candidate.recover();
++        assert_eq!(candidate.directions[0].status, "unknown");
++    }
++    #[test]
++    fn steering_retains_text_and_confirms_only_the_bound_turn() {
++        let mut run = fake_run();
++        let (candidate, request) = run.direction_request("more storage detail").unwrap();
++        assert_eq!(request["method"], "turn/steer");
++        assert_eq!(request["params"]["expectedTurnId"], "turn");
++        assert_eq!(candidate.directions[0].text, "more storage detail");
++        run.task = candidate;
++        run.controls.insert(100, "补充方向".into());
++        assert!(run.direction_request("more storage detail").is_err());
++        run.confirm_control(100, &json!({"turnId":"foreign-turn"}));
++        assert_eq!(run.task.directions[0].status, "unknown");
++        assert!(!run.task.events.last().unwrap().text.contains("已采用"));
++        run.next_id = 101;
++        let (candidate, _) = run.direction_request("a different direction").unwrap();
++        run.task = candidate;
++        run.controls.insert(100, "补充方向".into());
++        run.controls.remove(&100);
++        run.controls.insert(101, "补充方向".into());
++        run.confirm_control(101, &json!({"turnId":"turn"}));
++        assert_eq!(run.task.directions.last().unwrap().status, "accepted");
++    }
++    #[test]
++    fn resume_isolates_old_notifications_and_replays_early_new_turn() {
++        let mut run = fake_run();
++        run.task.status = "completed".into();
++        run.task.artifacts.push(crate::model::Artifact {
++            id: "first".into(),
++            name: "v1.md".into(),
++            kind: "markdown".into(),
++            content: "edited first".into(),
++            created_at: 0,
++        });
++        let (next, anchor) = run
++            .task
++            .continued(
++                run.task.revision,
++                &run.task.run_id,
++                &run.task.turn_id,
++                "next question",
++            )
++            .unwrap();
++        run.task = next;
++        run.resume_turn = Some(anchor);
++        run.startup = Startup::Connecting;
++        let request = run.thread_request(std::path::Path::new("/tmp/new"), "default");
++        assert_eq!(request["method"], "thread/resume");
++        assert_eq!(request["params"]["threadId"], "thread");
++        assert!(request["params"].get("cwd").is_none());
++        assert_eq!(request["params"]["sandbox"], "read-only");
++        let old =
++            json!({"method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}});
++        assert!(run.defer_notification(&old).unwrap());
++        assert!(run.buffered.is_empty());
++        assert!(run.start_turn(&json!({"thread":{"id":"thread","status":{"type":"active"},"turns":[{"id":"turn","status":"completed"}]}})).is_err());
++        assert!(run.start_turn(&json!({"thread":{"id":"thread","status":{"type":"idle"},"turns":[{"id":"newer","status":"failed"}]}})).is_err());
++        let request=run.start_turn(&json!({"model":"default","thread":{"id":"thread","status":{"type":"idle"},"turns":[{"id":"turn","status":"completed"}]}})).unwrap();
++        assert_eq!(request["params"]["input"][0]["text"], "next question");
++        assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
++        assert!(run.defer_notification(&old).unwrap());
++        let early = json!({"method":"item/completed","params":{"threadId":"thread","turnId":"second","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"second result"}}});
++        assert!(run.defer_notification(&early).unwrap());
++        let buffered = run.accept_turn(&json!({"turn":{"id":"second"}})).unwrap();
++        for message in buffered {
++            project(&mut run.task, &message);
++        }
++        assert_eq!(run.task.turn_id.as_deref(), Some("second"));
++        project(
++            &mut run.task,
++            &json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"second","status":"completed"}}}),
++        );
++        assert_eq!(run.task.artifacts.len(), 2);
++        assert_eq!(run.task.artifacts[0].content, "edited first");
++        assert_eq!(run.task.artifacts[1].content, "second result");
++        assert_eq!(run.task.artifacts[1].name, "codex-result-v2.md");
++    }
++    #[test]
+     #[cfg(unix)]
+     fn cleanup_after_leader_exit() {
+         check_group_cleanup(true);
+@@ -284,6 +659,10 @@
+             model_cursors: Vec::new(),
+             closed: false,
+             last_emit: Instant::now(),
++            resume_turn: None,
++            startup: Startup::Running,
++            buffered: Vec::new(),
++            buffered_bytes: 0,
+         }
+     }
+     #[test]
+@@ -1206,28 +1585,55 @@
+                 task = old.task.clone();
+             }
+         }
+-        task.status = "running".into();
+-        task.started_at = Some(now());
+-        task.finished_at = None;
+-        task.run_id = Some(uuid::Uuid::new_v4().to_string());
+-        task.thread_id = None;
+-        task.turn_id = None;
+-        task.nodes.clear();
+-        task.agent_activity_ids.clear();
+-        task.approvals.clear();
+-        task.artifacts.clear();
+-        task.tokens = None;
+-        task.revision += 1;
+-        task.event("正在连接本机 Codex；文件沙箱只读", "system", "工作台");
++        task.begin_run(false);
++        self.store.save_task(task.clone())?;
++        self.launch(app, task, None)
++    }
++    pub fn continue_task(
++        &self,
++        app: AppHandle,
++        task_id: String,
++        revision: u64,
++        run_id: Option<String>,
++        turn_id: Option<String>,
++        text: String,
++    ) -> Result<Task, String> {
++        let _lifecycle = self.begin_start()?;
++        self.ensure_idle()?;
++        let (task, anchor) = self
++            .store
++            .continue_task(&task_id, revision, &run_id, &turn_id, &text)?;
++        self.launch(app, task, Some(anchor))
++    }
++    fn fail_unlaunched(&self, app: &AppHandle, mut task: Task, error: &str) -> Task {
++        task.status = "failed".into();
++        task.finished_at = Some(now());
++        task.event(error, "error", "工作台");
++        self.publish(app, task.clone());
++        task
++    }
++    fn launch(
++        &self,
++        app: AppHandle,
++        task: Task,
++        resume_turn: Option<String>,
++    ) -> Result<Task, String> {
+         let run_id = task.run_id.clone().unwrap();
+         let directory = self.store.directory.join("runs").join(&run_id);
+-        std::fs::create_dir_all(&directory).map_err(|_| "无法创建任务目录".to_string())?;
+-        let mut child = OwnedChild::new(
+-            command()
+-                .current_dir(&directory)
+-                .spawn()
+-                .map_err(|_| "无法启动 Codex，请先在执行器设置中检查连接".to_string())?,
+-        );
++        if std::fs::create_dir_all(&directory).is_err() {
++            return Ok(self.fail_unlaunched(&app, task, "无法创建任务目录；已有交付保留"));
++        }
++        let child = match command().current_dir(&directory).spawn() {
++            Ok(child) => child,
++            Err(_) => {
++                return Ok(self.fail_unlaunched(
++                    &app,
++                    task,
++                    "无法启动 Codex，请先在执行器设置中检查连接；已有交付保留",
++                ))
++            }
++        };
++        let mut child = OwnedChild::new(child);
+         let input = child.child.stdin.take().unwrap();
+         let output = child.child.stdout.take().unwrap();
+         let mut stderr = child.child.stderr.take().unwrap();
+@@ -1244,17 +1650,15 @@
+             model_cursors: Vec::new(),
+             closed: false,
+             last_emit: Instant::now(),
++            resume_turn,
++            startup: Startup::Connecting,
++            buffered: Vec::new(),
++            buffered_bytes: 0,
+         }));
+         {
+             let mut runs = self.runs.lock().unwrap();
+             runs.retain(|_, r| !r.lock().unwrap().closed);
+             runs.insert(run_id.clone(), run.clone());
+-        }
+-        if let Err(error) = self.store.save_task(task.clone()) {
+-            let mut r = run.lock().unwrap();
+-            r.closed = true;
+-            let _ = r.child.stop();
+-            return Err(error);
+         }
+         let _ = app.emit("runtime-task", task.clone());
+         let sent = {
+@@ -1329,6 +1733,7 @@
+             r.task.status = status.into();
+             r.task.finished_at = Some(now());
+             r.task.approvals.clear();
++            r.task.unconfirm_directions();
+             r.pending.clear();
+             for n in &mut r.task.nodes {
+                 if matches!(n.status.as_str(), "running" | "approval" | "queued") {
+@@ -1358,6 +1763,16 @@
+         if r.closed {
+             return false;
+         }
++        match r.defer_notification(&message) {
++            Ok(true) => return true,
++            Ok(false) => {}
++            Err(error) => {
++                drop(r);
++                self.fail(app, run, &error, "unknown");
++                return false;
++            }
++        }
++        let mut replay = Vec::new();
+         let mut changed = false;
+         if message.get("method").is_some() && message.get("id").is_some() {
+             let method = message["method"].as_str().unwrap_or("");
+@@ -1456,7 +1871,7 @@
+                             "工作台",
+                         );
+                         changed = true;
+-                        Some(thread_request(directory, &model))
++                        Some(r.thread_request(directory, &model))
+                     }
+                     Ok(ModelChoice::NextPage(cursor)) => Some(
+                         json!({"id":4,"method":"model/list","params":{"limit":100,"cursor":cursor}}),
+@@ -1467,55 +1882,47 @@
+                         return false;
+                     }
+                 },
+-                2 => {
+-                    let thread = &message["result"]["thread"];
+-                    let Some(id) = thread["id"].as_str() else {
++                2 => match r.start_turn(&message["result"]) {
++                    Ok(request) => {
++                        changed = true;
++                        Some(request)
++                    }
++                    Err(error) => {
+                         drop(r);
+-                        self.fail(app, run, "执行器未返回有效 thread ID", "failed");
+-                        return false;
+-                    };
+-                    r.task.thread_id = Some(id.into());
+-                    r.task.root_node();
+-                    if let Some(node) = r.task.nodes.iter_mut().find(|n| n.id == id) {
+-                        node.model = message["result"]["model"]
+-                            .as_str()
+-                            .unwrap_or("实际模型未返回")
+-                            .into();
+-                    }
+-                    r.task.event("会话已创建，启动任务", "system", "工作台");
+-                    changed = true;
+-                    Some(
+-                        json!({"id":3,"method":"turn/start","params":{"threadId":id,"input":[{"type":"text","text":r.task.prompt}]}}),
+-                    )
+-                }
+-                3 => {
+-                    if let Some(id) = message["result"]["turn"]["id"].as_str() {
+-                        r.task.turn_id = Some(id.into());
+-                        r.task.revision += 1;
+-                        changed = true;
+-                    } else {
+-                        drop(r);
+-                        self.fail(app, run, "执行器未返回有效 turn ID", "failed");
++                        self.fail(app, run, &error, "failed");
+                         return false;
+                     }
+-                    None
+-                }
++                },
++                3 => match r.accept_turn(&message["result"]) {
++                    Ok(buffered) => {
++                        changed = true;
++                        replay = buffered;
++                        None
++                    }
++                    Err(error) => {
++                        drop(r);
++                        self.fail(app, run, &error, "unknown");
++                        return false;
++                    }
++                },
+                 _ => {
+-                    if let Some(kind) = r.controls.remove(&id) {
+-                        r.task.event(
+-                            &format!("{}请求已接收；执行结果以状态事件为准", kind),
+-                            "system",
+-                            "工作台",
+-                        );
+-                        changed = true;
+-                    }
++                    changed = r.confirm_control(id, &message["result"]);
+                     None
+                 }
+             };
+             if let Some(request) = request {
+                 if send(&mut r.input, &request).is_err() {
+                     drop(r);
+-                    self.fail(app, run, "无法启动执行器任务", "failed");
++                    self.fail(
++                        app,
++                        run,
++                        "无法发送启动请求，执行结果需核对",
++                        if request["method"] == "turn/start" {
++                            "unknown"
++                        } else {
++                            "failed"
++                        },
++                    );
+                     return false;
+                 }
+             }
+@@ -1540,11 +1947,18 @@
+         }
+         let delta = message["method"] == "item/agentMessage/delta";
+         let should_emit = changed && (!delta || r.last_emit.elapsed() > Duration::from_millis(180));
+-        if should_emit {
++        let snapshot = should_emit.then(|| {
+             r.last_emit = Instant::now();
+-            let snapshot = r.task.clone();
+-            drop(r);
++            r.task.clone()
++        });
++        drop(r);
++        if let Some(snapshot) = snapshot {
+             self.publish(app, snapshot);
++        }
++        for deferred in replay {
++            if !self.receive(app, run, deferred, directory) {
++                return false;
++            }
+         }
+         !terminal
+     }
+@@ -1557,28 +1971,53 @@
+             .ok_or_else(|| "运行已失效，请核对状态".into())
+     }
+     pub fn steer(&self, app: &AppHandle, id: String, text: String) -> Result<(), String> {
+-        if text.trim().is_empty() || text.chars().count() > 2000 {
+-            return Err("补充方向应为 1–2000 字".into());
+-        }
+         let run = self.run(&id)?;
+         let mut r = run.lock().unwrap();
+-        if r.closed || r.task.status == "cancelling" {
+-            return Err("运行已结束或正在中断".into());
+-        }
+-        let turn = r.task.turn_id.clone().ok_or("任务尚未开始，请稍后再试")?;
+-        let thread = r.task.thread_id.clone().ok_or("会话未创建")?;
++        let (candidate, request) = r.direction_request(&text)?;
+         let request_id = r.next_id;
++        let saved = self
++            .store
++            .save_existing_task(candidate)?
++            .ok_or("任务状态已变化，补充未发送")?;
++        r.task = saved;
+         r.next_id += 1;
+-        send(
+-            &mut r.input,
+-            &json!({"id":request_id,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":text.trim()}]}}),
+-        )?;
+         r.controls.insert(request_id, "补充方向".into());
+-        r.task
+-            .event("已发送补充方向，等待执行器确认", "input", "你");
++        if send(&mut r.input, &request).is_err() {
++            drop(r);
++            self.fail(
++                app,
++                &run,
++                "补充发送结果未知，请核对交付，勿重复发送",
++                "unknown",
++            );
++            return Err("补充发送结果未知，请勿重复发送".into());
++        }
+         let task = r.task.clone();
+         drop(r);
+-        self.publish(app, task);
++        let _ = app.emit("runtime-task", task);
++        let runtime = self.clone();
++        let app = app.clone();
++        thread::spawn(move || {
++            thread::sleep(Duration::from_secs(20));
++            let mut r = run.lock().unwrap();
++            let key = format!("{}:{}", id, request_id);
++            if let Some(direction) = r
++                .task
++                .directions
++                .iter_mut()
++                .find(|d| d.id == key && d.status == "pending")
++            {
++                direction.status = "unknown".into();
++                r.task.event(
++                    "补充确认超时，请在交付中核对结果，勿重复发送",
++                    "error",
++                    "工作台",
++                );
++                let task = r.task.clone();
++                drop(r);
++                runtime.publish(&app, task);
++            }
++        });
+         Ok(())
+     }
+     pub fn interrupt(&self, app: AppHandle, id: String) -> Result<(), String> {
+@@ -1664,6 +2103,7 @@
+             if !r.closed {
+                 r.closed = true;
+                 r.task.status = "unknown".into();
++                r.task.unconfirm_directions();
+                 r.task.approvals.clear();
+                 r.pending.clear();
+                 r.task
+--- a/src-tauri/src/store.rs
++++ b/src-tauri/src/store.rs
+@@ -100,6 +100,28 @@
+         *data = candidate;
+         Ok(())
+     }
++    pub fn continue_task(
++        &self,
++        id: &str,
++        revision: u64,
++        run: &Option<String>,
++        turn: &Option<String>,
++        text: &str,
++    ) -> Result<(Task, String), String> {
++        let mut data = self.data.lock().unwrap();
++        let index = data
++            .tasks
++            .iter()
++            .position(|t| t.id == id)
++            .ok_or("任务不存在")?;
++        let (next, anchor) = data.tasks[index].continued(revision, run, turn, text)?;
++        validate(&next)?;
++        let mut candidate = data.clone();
++        candidate.tasks[index] = next.clone();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok((next, anchor))
++    }
+     pub fn save_existing_task(&self, mut task: Task) -> Result<Option<Task>, String> {
+         let mut data = self.data.lock().unwrap();
+         let Some(index) = data.tasks.iter().position(|t| t.id == task.id) else {
+@@ -338,6 +360,35 @@
+         || task.nodes.len() > 64
+         || task.events.len() > 100
+         || task.artifacts.len() > 10
++        || task.answer_items.len() > crate::model::ANSWER_LIMIT
++        || task.answer_items.iter().any(|item| item.id.len() > 200)
++        || task
++            .answer_items
++            .iter()
++            .map(|item| item.text.chars().count())
++            .sum::<usize>()
++            > crate::model::answer_budget()
++        || task.directions.len() > 20
++        || task.directions.iter().any(|d| {
++            d.id.len() > 200
++                || d.run_id.len() > 100
++                || d.turn_id.len() > 100
++                || d.text.trim().is_empty()
++                || d.text.chars().count() > 2000
++                || !matches!(
++                    d.status.as_str(),
++                    "pending" | "accepted" | "rejected" | "unknown"
++                )
++        })
++        || task.supplements.len() > 10
++        || task.supplements.iter().any(|s| {
++            s.run_id.is_empty()
++                || s.run_id.len() > 100
++                || s.previous_turn_id.is_empty()
++                || s.previous_turn_id.len() > 100
++                || s.text.trim().is_empty()
++                || s.text.chars().count() > 2000
++        })
+     {
+         return Err("任务记录超出允许范围".into());
+     }
+@@ -361,6 +412,120 @@
+             created_at: 0,
+         });
+         task
++    }
++    #[test]
++    fn completed_message_is_persisted_before_any_later_turn_event() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = document();
++        task.status = "running".into();
++        task.thread_id = Some("root".into());
++        task.turn_id = Some("turn".into());
++        task.root_node();
++        let mut child = task.nodes[0].clone();
++        child.id = "child".into();
++        child.parent_id = Some("root".into());
++        child.role = "子 Agent".into();
++        task.nodes.push(child);
++        store.save_task(task.clone()).unwrap();
++        for (thread, expected) in [
++            ("root", "complete root answer"),
++            ("child", "complete child answer"),
++        ] {
++            assert!(crate::protocol::project(
++                &mut task,
++                &serde_json::json!({"method":"item/completed","params":{"threadId":thread,"turnId":"turn","item":{"id":format!("answer-{thread}"),"type":"agentMessage","phase":"final_answer","text":expected}}})
++            ));
++            let saved = store
++                .save_existing_task(task.clone())
++                .unwrap()
++                .expect("complete message must advance the saved revision immediately");
++            assert_eq!(
++                saved.nodes.iter().find(|n| n.id == thread).unwrap().output,
++                expected
++            );
++            let reopened = Store::open(directory.clone())
++                .unwrap()
++                .task(&task.id)
++                .unwrap();
++            assert_eq!(
++                reopened
++                    .nodes
++                    .iter()
++                    .find(|n| n.id == thread)
++                    .unwrap()
++                    .output,
++                expected
++            );
++        }
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn continuation_admission_is_atomic_and_old_runs_cannot_replace_versions() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = document();
++        task.thread_id = Some("root".into());
++        task.turn_id = Some("first".into());
++        store.save_task(task.clone()).unwrap();
++        let task = store
++            .edit_artifact("doc", "# Original", "# Edited original")
++            .unwrap();
++        let bytes = fs::read(directory.join("workspace.json")).unwrap();
++        fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store
++            .continue_task(
++                &task.id,
++                task.revision,
++                &task.run_id,
++                &task.turn_id,
++                "more details"
++            )
++            .is_err());
++        assert_eq!(store.task(&task.id).unwrap().run_id, task.run_id);
++        assert_eq!(fs::read(directory.join("workspace.json")).unwrap(), bytes);
++        fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        let (mut next, _) = store
++            .continue_task(
++                &task.id,
++                task.revision,
++                &task.run_id,
++                &task.turn_id,
++                "more details",
++            )
++            .unwrap();
++        assert!(store
++            .continue_task(
++                &task.id,
++                task.revision,
++                &task.run_id,
++                &task.turn_id,
++                "duplicate"
++            )
++            .is_err());
++        let mut late = task.clone();
++        late.revision = next.revision + 100;
++        assert!(store.save_existing_task(late).unwrap().is_none());
++        next.turn_id = Some("second".into());
++        crate::protocol::project(
++            &mut next,
++            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"second","item":{"id":"answer","type":"agentMessage","text":"new version"}}}),
++        );
++        crate::protocol::project(
++            &mut next,
++            &serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"second","status":"completed"}}}),
++        );
++        store.save_existing_task(next).unwrap().unwrap();
++        let reopened = Store::open(directory.clone())
++            .unwrap()
++            .task(&task.id)
++            .unwrap();
++        assert_eq!(reopened.artifacts.len(), 2);
++        assert_eq!(reopened.artifacts[0].id, "doc");
++        assert_eq!(reopened.artifacts[0].content, "# Edited original");
++        assert_eq!(reopened.artifacts[1].content, "new version");
++        assert_eq!(reopened.supplements[0].text, "more details");
++        fs::remove_dir_all(directory).unwrap();
+     }
+     #[test]
+     fn legacy_demo_history_is_retired_without_losing_real_documents() {

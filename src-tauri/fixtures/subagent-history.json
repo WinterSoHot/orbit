@@ -1,0 +1,94 @@
+{
+  "id": "01a101a0-bba0-7e00-9a71-07f250c731ef",
+  "turns": [
+    {
+      "id": "01a101a0-bec4-77c1-b51f-fbdbc7064895",
+      "items": [
+        {
+          "type": "subAgentActivity",
+          "id": "call_LBZEt5K9oJnqiWESfmzJmmTI",
+          "kind": "started",
+          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
+          "agentPath": "/root/product"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "call_5ZRhklJhvxp3SWpkRpNVuFMs",
+          "kind": "started",
+          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
+          "agentPath": "/root/technical"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "call_wVudC5aeMKMRsT3P1NHyN608",
+          "kind": "started",
+          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
+          "agentPath": "/root/challenger"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a1-63b8-7700-9ba6-ea021730c242",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
+          "agentPath": "/root/challenger"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a1-3a57-7441-a8c3-9c0386c09823",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
+          "agentPath": "/root/product"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a1-4adc-78e3-8de7-124ffdf62a2c",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
+          "agentPath": "/root/technical"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "call_hfVdoYJso9JL6USHCjQMQzhV",
+          "kind": "interacted",
+          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
+          "agentPath": "/root/challenger"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a2-b4ff-7262-b851-03430900c9d1",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-6379-74f1-8ce9-a6c1bfd57895",
+          "agentPath": "/root/challenger"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "call_XlRlYR2EI22H3zOfCaaVGXzo",
+          "kind": "interacted",
+          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
+          "agentPath": "/root/product"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "call_aPrMixw02CEhtcb4w097LWcR",
+          "kind": "interacted",
+          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
+          "agentPath": "/root/technical"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a3-2fff-7ae0-8d85-58b93e0abdfa",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-39ee-7992-bf98-e19a622cbd3c",
+          "agentPath": "/root/product"
+        },
+        {
+          "type": "subAgentActivity",
+          "id": "subagent-completed-01a101a3-4ded-74f1-b1fe-d3008c0b9a9b",
+          "kind": "completed",
+          "agentThreadId": "01a101a1-4a95-71e3-a320-00e417a9a1ff",
+          "agentPath": "/root/technical"
+        }
+      ]
+    }
+  ]
+}

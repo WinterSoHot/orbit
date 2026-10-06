@@ -1,0 +1,29 @@
+[package]
+name = "orbit-agent-workbench"
+version = "0.1.0"
+description = "Personal agent workbench"
+edition = "2021"
+
+[lib]
+name = "orbit_workbench_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
+
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+
+tauri-plugin-dialog = { version = "2", optional = true }
+
+base64 = "0.22"
+reqwest = { version = "0.13", features = ["blocking", "gzip"] }
+scraper = "0.26"

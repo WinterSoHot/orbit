@@ -1,0 +1,580 @@
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,5 +1,5 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { Activity, ArrowRight, ArrowUpRight, RefreshCw, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
++import { Activity, ArrowRight, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+ import { applyRuntime, editDocument, isActive, isTerminal, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
+ import type { Approval, Artifact, Provider, Scene, Status, Task } from './model';
+ import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+@@ -90,7 +90,7 @@
+   return <div className="app-shell">
+     <aside className="sidebar">
+       <div className="brand"><img src="/orbit.svg" alt=""/><span>Orbit<span className="brand-sub">你的 Agent 工作台</span></span></div>
+-      <div className="workspace"><span className="workspace-avatar">G</span><span>个人工作空间<small>本地优先</small></span><ChevronDown size={13}/></div>
++      <div className="workspace"><span className="workspace-avatar"><Laptop size={17}/></span><span>个人工作空间<small>此设备上的任务与记录</small></span></div>
+       <div className="nav-section">工作空间</div>
+       <nav aria-label="主导航">
+         <button className={view==='tasks'?'nav-item active':'nav-item'} onClick={()=>setView('tasks')}><LayoutDashboard size={17}/>任务工作台<span>{tasks.length}</span></button>
+@@ -99,32 +99,32 @@
+       </nav>
+       <div className="nav-section scenes-label">任务场景</div>
+       <nav aria-label="场景筛选">{(['all','research','coding','writing'] as const).map(s=><button key={s} className={`nav-item scene-item ${scene===s&&view==='tasks'?'selected-scene':''}`} onClick={()=>{setScene(s);setView('tasks');}}><span className={`scene-dot ${s}`}/>{s==='all'?'全部场景':sceneLabels[s]}</button>)}</nav>
+-      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>运行在你的电脑</strong><p>任务与记录留在本地<br/>模型请求由执行器发送</p><span className="local-tech">TAURI 2 <span>·</span> RUST</span></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><span className="user-avatar">G</span><div>个人工作台<small>Orbit Preview · 0.1</small></div><CircleHelp size={15}/></div></div>
++      <div className="sidebar-bottom"><div className="local-card"><span className="local-indicator"/><strong>本地工作空间</strong><p>{persistence.current?'任务记录自动保存在此设备':'保存不可用，当前修改暂存内存'}</p></div><button className={view==='settings'?'nav-item active':'nav-item'} onClick={()=>setView('settings')}><Settings2 size={17}/>执行器设置</button><div className="profile"><img src="/orbit.svg" alt=""/><div>Orbit<small>版本 0.1 · 本地工作台</small></div></div></div>
+     </aside>
+     <main className="main-shell">
+-      <header className="topbar"><div className="breadcrumb">工作空间 <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button><span className="user-avatar small">G</span></div></header>
++      <header className="topbar"><div className="breadcrumb">Orbit <span>/</span> <strong>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</strong></div><div className="topbar-right"><span className="local-status"><span className="local-indicator"/>{desktop?'桌面运行':'浏览器预览'}</span><span className="topbar-divider"/><button className="icon-button" aria-label="查看待介入" onClick={()=>setView('attention')}><Bell size={17}/>{attention.length>0&&<i/>}</button></div></header>
+       <div className="page-content">
+-        <div className="page-heading"><div><div className="eyebrow">PERSONAL AGENT WORKSPACE</div><h1>{view==='tasks'?'让任务持续向前。':view==='attention'?'把注意力留给判断。':view==='artifacts'?'每份成果，都有去处。':'连接你的执行器。'}</h1><p>{view==='tasks'?'发起任务，看见协作，在需要时介入。':view==='attention'?'审批与补充信息集中在这里，每一次介入都有上下文。':view==='artifacts'?'执行结束后，检查结果，再决定是否验收。':'先检查本机连接，再显式启动真实任务。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
+-        <div className="metrics"><div className="metric"><span className="metric-icon mint"><Zap size={18}/></span><div><small>正在推进</small><strong>{active}<span>个任务</span></strong></div><span className="metric-note">包含演示</span></div><button className="metric metric-button" onClick={()=>setView('attention')}><span className="metric-icon peach"><Bell size={18}/></span><div><small>等待你介入</small><strong>{attention.length}<span>个请求</span></strong></div><ArrowUpRight size={16}/></button><button className="metric metric-button" onClick={()=>setView('artifacts')}><span className="metric-icon lavender"><FileText size={18}/></span><div><small>已生成交付</small><strong>{deliveries.length}<span>份成果</span></strong></div><ArrowUpRight size={16}/></button></div>
++        <div className="page-heading"><div><h1>{view==='tasks'?'任务工作台':view==='attention'?'待介入':view==='artifacts'?'交付物':'执行器设置'}</h1><p>{view==='tasks'?'查看进度、协作与结果。':view==='attention'?'处理 Agent 的审批与信息请求。':view==='artifacts'?'预览、编辑和保存任务成果。':'连接本机 Codex，管理执行方式。'}</p></div><button className="primary-button" onClick={()=>setModal(true)}><Plus size={17}/>新建任务<span>⌘ N</span></button></div>
++        <div className="workspace-summary" aria-label="工作空间概览"><span><span className="status-dot running"/><strong>{active}</strong> 进行中<span className="summary-note">含演示</span></span><button onClick={()=>setView('attention')}><Bell size={14}/><strong>{attention.length}</strong> 待介入</button><button onClick={()=>setView('artifacts')}><FileText size={14}/><strong>{deliveries.length}</strong> 份交付</button></div>
+ 
+         {view==='tasks'&&<div className="workbench">
+-          <section className="task-panel"><div className="panel-heading"><h2>任务<span>{filtered.length}</span></h2><button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button></div><div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div><label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>{t.provider==='demo'?'演示':'Codex'}</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>没有匹配的任务</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
++          <section className="task-panel"><div className="panel-heading"><h2>任务<span>{filtered.length}</span></h2><button className="icon-button" aria-label="切换任务筛选" onClick={()=>setTaskFilter(taskFilter==='all'?'active':taskFilter==='active'?'completed':'all')}><ListFilter size={16}/></button></div><div className="task-tabs">{(['all','active','completed'] as const).map(f=><button key={f} className={f===taskFilter?'active':''} onClick={()=>setTaskFilter(f)}>{f==='all'?'全部':f==='active'?'进行中':'已结束'}</button>)}</div><label className="search"><Search size={14}/><input aria-label="搜索任务" placeholder="搜索任务…" value={query} onChange={e=>setQuery(e.target.value)}/><span>⌘ K</span></label><div className="task-list">{filtered.map(t=><button key={t.id} className={`task-card ${task?.id===t.id?'selected':''}`} aria-pressed={task?.id===t.id} onClick={()=>select(t)}><div className="task-card-top"><span className={`scene-chip ${t.scene}`}>{sceneLabels[t.scene]}</span><span className={`provider-label ${t.provider}`}>{t.provider==='demo'?'演示':'Codex'}</span></div><h3>{t.title}</h3><p>{t.prompt}</p><div className="task-card-footer"><Badge status={t.status}/><span>{t.nodes.length>0&&<><Bot size={12}/>{t.nodes.length}</>}</span></div></button>)}{!filtered.length&&<div className="empty-list"><Search size={22}/><p>没有匹配的任务</p><button onClick={()=>{setQuery('');setScene('all');setTaskFilter('all');}}>清除筛选</button></div>}</div><div className="task-panel-footer"><span className="status-dot completed"/>{persistence.current?'自动保存到本地':'当前修改暂存内存'}</div></section>
+           <div className="task-detail">{task?<>
+-            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务 · 无模型调用':'Codex · 只读文件沙箱'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&task.provider==='codex'&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}<Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
+-            <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`RUN ${task.runId.slice(0,8).toUpperCase()}`:'尚无运行'}</span></div>
++            <div className="detail-header"><div className="detail-title"><span className={`scene-chip ${task.scene}`}>{sceneLabels[task.scene]}</span><span className={`provider-label ${task.provider}`}>{task.provider==='demo'?'演示任务':'Codex · 只读'}</span><h2>{task.title}</h2></div><div className="detail-actions">{desktop&&task.provider==='codex'&&isTerminal(task.status)&&task.threadId&&<button className="secondary-button compact" disabled={busy} onClick={syncCollaboration}><RefreshCw size={13}/>同步协作</button>}<Badge status={task.status}/>{isActive(task.status)?<button className="secondary-button compact" disabled={busy||task.status==='cancelling'} onClick={stop}><Square size={12}/>{task.status==='cancelling'?'请求中':'中断'}</button>:<button className="secondary-button compact" disabled={busy||(!desktop&&task.provider==='codex')} onClick={()=>launch(task)}>{busy?<Loader2 className="spin" size={13}/>:<Zap size={13}/>} {task.status==='queued'?'启动任务':task.provider==='demo'?'重新演示':'新运行'}</button>}</div></div>
++            <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`运行 ${task.runId.slice(0,8)}`:'尚无运行'}</span></div>
+             {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
+             <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>{task.provider==='demo'?'演示关系': '已观测关系'}</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
+-              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2><MoreHorizontal size={16}/></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><label>当前工作</label><p className="inspector-summary">{node.summary}</p><label>输出摘要</label><p className="inspector-output">{node.output||'收到执行事件后，输出会显示在这里。'}</p><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
++              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||'收到执行事件后，输出会显示在这里。'}</p><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
+             {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p>{task.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(task,a.id,true)}>按建议继续<ArrowRight size={13}/></button><button className="text-button" disabled={busy} onClick={()=>reply(task,a.id,false)}>拒绝并停止</button></div>}</div></div>)}
+             <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，真实事件或演示事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
+-            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>执行结束，结果等待你检查与验收。</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
++            {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>可预览、编辑或下载。</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
+           </>:<div className="large-empty"><Bot size={40}/><h2>从一个任务开始</h2><p>调研、编程或写作，都可以从这里推进。</p><button className="primary-button" onClick={()=>setModal(true)}><Plus size={16}/>新建任务</button></div>}</div>
+         </div>}
+ 
+         {view==='attention'&&<section className="collection-panel"><div className="panel-heading"><h2>待处理请求 <span>{attention.length}</span></h2><span className="subtle">只显示当前仍有效的请求</span></div>{attention.length?attention.map(({task:t,approval:a})=><div className="attention-item" key={`${t.id}-${a.id}`}><div className="attention-item-icon"><Bell size={20}/></div><div><span className="provider-label">{t.provider==='demo'?'演示':'Codex'} · {t.title}</span><h3>{a.title}</h3><p>{a.description}</p>{t.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(t,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(t,a.id,true)}>按建议继续<Check size={14}/></button><button className="text-button" onClick={()=>{select(t);setView('tasks');}}>查看上下文<ArrowUpRight size={13}/></button></div>}</div></div>):<div className="large-empty"><CheckCircle2 size={42}/><h2>暂时不需要你介入</h2><p>有效的审批与信息请求会自动汇集到这里。</p></div>}</section>}
+-        {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">演示结果会明确标注</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{t.provider==='demo'?'演示交付':'Codex 输出'}</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>成果正在路上</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
++        {view==='artifacts'&&<section className="collection-panel"><div className="panel-heading"><h2>交付物 <span>{deliveries.length}</span></h2><span className="subtle">演示结果会明确标注</span></div><div className="artifact-grid">{deliveries.map(({task:t,artifact:a})=><button className="artifact-card" key={`${t.id}-${a.id}`} onClick={()=>setArtifact(a)}><span className="artifact-file-icon"><FileText size={26}/></span><span className="provider-label">{t.provider==='demo'?'演示交付':'Codex 输出'}</span><h3>{a.name}</h3><p>{t.title}</p><div><span>{new Date(a.createdAt).toLocaleDateString('zh-CN')}</span><ArrowUpRight size={15}/></div></button>)}</div>{!deliveries.length&&<div className="large-empty"><FolderOpen size={42}/><h2>还没有交付物</h2><p>任务生成的纯文本交付会保存在这里。</p></div>}</section>}
+         {view==='settings'&&<section className="settings-panel"><div className="settings-title"><span className="metric-icon mint"><Terminal size={21}/></span><div><h2>Codex 本地执行器</h2><p>通过 App Server 接收真实状态，不读取或展示你的认证信息。</p></div><span className="provider-label codex">本机 CLI</span></div><div className="settings-body"><div className="settings-line"><div><strong>连接检查</strong><p>检查 CLI 版本和初始化协议。此操作不调用模型，会访问 CLI 本地状态。</p></div><button className="secondary-button" disabled={!desktop||checking} onClick={inspectCli}>{checking?<Loader2 className="spin" size={15}/>:<Zap size={15}/>} {checking?'检查中…':'检查连接'}</button></div>{doctor&&<div className={`doctor-result ${doctor.initialized?'success':''}`}><CheckCircle2 size={18}/><div><strong>{doctor.message}</strong><p>{doctor.version||'版本不可用'}</p><code>{doctor.path}</code></div></div>}{!desktop&&<div className="inline-notice"><CircleHelp size={16}/>浏览器预览仅支持演示；打开 Tauri 桌面 App 后可连接本机 Codex。</div>}<div className="settings-line"><div><strong>执行模型</strong><p>每次启动读取 CLI 模型目录中的默认项，任务详情显示执行器确认的实际模型。</p></div><span className="setting-value">CLI 目录默认</span></div><div className="settings-line"><div><strong>执行权限</strong><p>文件沙箱固定只读，拒绝权限提升；MCP 工具沿用本机 CLI 设置。</p></div><span className="setting-value"><ShieldCheck size={14}/>只读</span></div><div className="settings-line"><div><strong>并发与恢复</strong><p>一个真实根任务；演示可并行。重启保留记录，使旧请求失效。</p></div><span className="setting-value">1 个真实任务</span></div><div className="settings-line"><div><strong>认证与用量</strong><p>沿用本机 CLI 已配置的认证。真实任务会消耗相应模型额度。</p></div><span className="setting-value">由 CLI 管理</span></div><div className="settings-footnote"><CircleHelp size={15}/><p>这是个人本地原型。完整任务、审批、中断和子代理链路需要在真实运行中验证；连接成功只代表初始化成功。</p></div></div></section>}
+-        <footer className="page-footer"><span><ShieldCheck size={12}/>{persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit Preview <span>·</span> 把注意力留给重要的事</span></footer>
++        <footer className="page-footer"><span><ShieldCheck size={12}/>{persistence.current?'记录保存在本地':'当前修改暂存内存'}</span><span>Orbit <span>·</span> 个人 Agent 工作台</span></footer>
+       </div>
+     </main>
+     {modal&&<NewTask onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
+@@ -135,7 +135,7 @@
+ 
+ function NewTask({onClose,onCreate,busy}:{onClose:()=>void;onCreate:(title:string,prompt:string,scene:Scene,provider:Provider)=>void;busy:boolean}) {
+   const [title,setTitle]=useState(''),[prompt,setPrompt]=useState(''),[scene,setScene]=useState<Scene>('research'),[provider,setProvider]=useState<Provider>('demo');
+-  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(title.trim()&&prompt.trim())onCreate(title,prompt,scene,provider);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>开始一个新任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><label>任务场景</label><div className="scene-choices">{(['research','coding','writing'] as Scene[]).map(s=><button key={s} type="button" className={scene===s?'selected':''} onClick={()=>setScene(s)}><span className={`scene-dot ${s}`}/>{sceneLabels[s]}{scene===s&&<Check size={13}/>}</button>)}</div><label>执行方式</label><div className="provider-choices"><button type="button" className={provider==='demo'?'selected':''} onClick={()=>setProvider('demo')}><Sparkles size={17}/><span><strong>交互演示</strong><small>模拟协作，不调用模型</small></span>{provider==='demo'&&<Check size={15}/>}</button><button type="button" disabled={!desktop} className={provider==='codex'?'selected':''} onClick={()=>setProvider('codex')}><Terminal size={17}/><span><strong>本机 Codex</strong><small>{desktop?'只读执行，会消耗模型额度':'需要 Tauri 桌面 App'}</small></span>{provider==='codex'&&<Check size={15}/>}</button></div><div className="new-task-note"><ShieldCheck size={14}/>{provider==='demo'?'创建后点击启动，体验协作与审批流程。':'创建后仍需点击启动。默认文件只读，权限提升会被拒绝。'}</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy||!title.trim()||!prompt.trim()}>创建任务<ArrowRight size={15}/></button></div></form></div>;
++  return <div className="modal-backdrop" onClick={onClose}><form className="new-task-modal" role="dialog" aria-modal="true" aria-label="新建任务" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(title.trim()&&prompt.trim())onCreate(title,prompt,scene,provider);}}><div className="modal-heading"><div><span className="modal-spark"><Sparkles size={20}/></span><h2>新建任务</h2></div><button type="button" className="icon-button" aria-label="关闭新建任务" onClick={onClose}><X size={20}/></button></div><div className="modal-body"><p className="modal-description">描述你想达成的结果，让 Agent 帮你向前推进。</p><label>任务名称<input autoFocus placeholder="例如：比较个人知识库工具" value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} required/></label><label>目标与交付<textarea placeholder="你需要什么结果？有什么范围或限制？" value={prompt} maxLength={12000} onChange={e=>setPrompt(e.target.value)} required rows={4}/></label><label>任务场景</label><div className="scene-choices">{(['research','coding','writing'] as Scene[]).map(s=><button key={s} type="button" className={scene===s?'selected':''} onClick={()=>setScene(s)}><span className={`scene-dot ${s}`}/>{sceneLabels[s]}{scene===s&&<Check size={13}/>}</button>)}</div><label>执行方式</label><div className="provider-choices"><button type="button" className={provider==='demo'?'selected':''} onClick={()=>setProvider('demo')}><Sparkles size={17}/><span><strong>交互演示</strong><small>模拟协作，不调用模型</small></span>{provider==='demo'&&<Check size={15}/>}</button><button type="button" disabled={!desktop} className={provider==='codex'?'selected':''} onClick={()=>setProvider('codex')}><Terminal size={17}/><span><strong>本机 Codex</strong><small>{desktop?'只读执行，会消耗模型额度':'需要 Tauri 桌面 App'}</small></span>{provider==='codex'&&<Check size={15}/>}</button></div><div className="new-task-note"><ShieldCheck size={14}/>{provider==='demo'?'创建后点击启动，体验协作与审批流程。':'创建后仍需点击启动。默认文件只读，权限提升会被拒绝。'}</div></div><div className="modal-footer"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy||!title.trim()||!prompt.trim()}>创建任务</button></div></form></div>;
+ }
+ 
+ function RealApprovalForm({approval,busy,onAnswer}:{approval:Approval;busy:boolean;onAnswer:(answers:Record<string,string>)=>void}) {
+--- a/src/Graph.tsx
++++ b/src/Graph.tsx
+@@ -20,19 +20,19 @@
+   const icons=[Bot,Compass,Microscope,ShieldCheck];
+   return <div className="graph-scroll"><div className="graph-canvas" style={{minWidth:width,height}}>
+     <svg width={width} height={height} className="graph-lines" aria-hidden="true">
+-      <defs><pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.8" fill="#dfe4e9"/></pattern></defs>
++      <defs><pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.7" fill="#d9dce3"/></pattern></defs>
+       <rect width="100%" height="100%" fill="url(#dots)"/>
+       {nodes.map(node=>{
+         const from=node.parentId?positions.get(node.parentId):null,to=positions.get(node.id)!;
+         if(!from)return null;
+-        const d=`M ${from.x} ${from.y+92} C ${from.x} ${from.y+135}, ${to.x} ${to.y-40}, ${to.x} ${to.y}`;
++        const d=`M ${from.x} ${from.y+132} C ${from.x} ${from.y+150}, ${to.x} ${to.y-24}, ${to.x} ${to.y}`;
+         const active=node.status==='running';
+-        return <g key={node.id}><path d={d} className={active?'edge active':'edge'}/>{active&&<circle r="3.5" fill="#42a88b"><animateMotion dur="2.5s" repeatCount="indefinite" path={d}/></circle>}</g>;
++        return <g key={node.id}><path d={d} className={active?'edge active':'edge'}/></g>;
+       })}
+     </svg>
+     {nodes.map((node,i)=>{
+       const p=positions.get(node.id)!,Icon=icons[i%icons.length]||CircleHelp;
+-      return <button key={node.id} className={`agent-node ${node.status} ${selected===node.id?'selected':''}`} style={{left:p.x-85,top:p.y}} onClick={()=>onSelect(node.id)} aria-label={`查看 ${node.name} · ${statusLabels[node.status]}`}>
++      return <button key={node.id} className={`agent-node ${node.status} ${selected===node.id?'selected':''}`} style={{left:p.x-85,top:p.y}} onClick={()=>onSelect(node.id)} aria-pressed={selected===node.id} aria-label={`查看 ${node.name} · ${statusLabels[node.status]}`}>
+         <span className="node-top"><span className={`node-icon tone-${i%4}`}><Icon size={16}/></span><span className={`status-dot ${node.status}`}/></span>
+         <strong>{node.name}</strong><span className="node-role">{node.role}</span>
+         <span className="node-bottom"><span>{statusLabels[node.status]}</span><span>{node.status==='running'?'•••':node.status==='completed'?'✓':'—'}</span></span>
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -1,30 +1,445 @@
+-:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#233244;background:#f6f7f9;font-synthesis:none;font-size:13px;font-weight:400;--mint:#227e67;--border:#e6e9ed;--muted:#8b96a5;--nav:#1e2e3e}
+-*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}button{cursor:pointer;border:0;background:none;color:inherit}button:disabled{cursor:not-allowed;opacity:.5}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #88cfb4;outline-offset:3px}button,a,input,textarea{-webkit-tap-highlight-color:transparent}p,h1,h2,h3{margin:0}button{transition:background .15s,border-color .15s,box-shadow .15s}svg{flex-shrink:0}input,textarea{color:#273446}input::placeholder,textarea::placeholder{color:#a4adb9}::selection{background:#c3eadb}.app-shell{display:flex;min-height:100vh}.sidebar{width:192px;flex-shrink:0;background:var(--nav);color:#b8c3cf;padding:28px 14px 0;display:flex;flex-direction:column;position:fixed;inset:0 auto 0 0;z-index:5}.brand{display:flex;gap:10px;align-items:center;padding:0 8px 25px;color:#fff;font-size:24px;font-weight:650;letter-spacing:-.8px}.brand img{width:38px;height:38px}.brand-sub{display:block;font-size:10px;letter-spacing:1px;font-weight:400;color:#94a5b6;margin-top:2px}.workspace{display:flex;align-items:center;gap:9px;margin:4px 0 30px;padding:12px 8px;border:1px solid #ffffff0d;border-radius:8px;background:#ffffff04;font-size:11px;color:#e4e9ee}.workspace small{display:block;color:#8293a4;font-size:10px;margin-top:3px}.workspace>svg{margin-left:auto;color:#8293a4}.workspace-avatar{background:#3c514f;color:#c9e4d6;display:grid;place-items:center;border-radius:6px;width:27px;height:27px;font-weight:600}.nav-section{font-size:9px;letter-spacing:1.3px;color:#7c8fa2;padding:0 11px 10px}.nav-item{width:100%;display:flex;align-items:center;gap:11px;text-align:left;padding:12px 11px;border-radius:6px;font-size:12px;margin-bottom:4px;color:#a7b8c8}.nav-item:hover{background:#ffffff07}.nav-item.active{background:#344c4d;color:#bdf0da}.nav-item>span:last-child:not(.scene-dot){margin-left:auto;font-size:10px;color:#9baebe}.nav-item .attention-count{color:#f2c69c!important;background:#654f3e;width:18px;height:18px;text-align:center;line-height:18px;border-radius:5px}.scenes-label{margin-top:29px}.scene-item{padding:10px 13px;font-size:11px}.scene-item.selected-scene{color:#e0ece7}.scene-dot{width:6px;height:6px;border-radius:2px;background:#8995a5;display:inline-block;flex-shrink:0}.scene-dot.research{background:#83bcaa}.scene-dot.coding{background:#999ac9}.scene-dot.writing{background:#c7a483}.scene-dot.all{background:#6c8296}.sidebar-bottom{margin-top:auto;padding-top:30px}.local-card{border:1px solid #ffffff0b;background:#ffffff03;border-radius:8px;margin:0 1px 17px;padding:13px 12px}.local-card strong{font-size:10px;font-weight:500;color:#ced9e0;margin-left:6px}.local-indicator{display:inline-block;width:6px;height:6px;border-radius:50%;background:#7ab69c;box-shadow:0 0 0 3px #7ab69c13}.local-card p{font-size:10px;color:#7f91a3;line-height:1.8;margin:8px 0 13px}.local-tech{font-size:8px;letter-spacing:1.2px;color:#8098a9}.local-tech>span{margin:0 6px}.profile{display:flex;gap:9px;align-items:center;border-top:1px solid #ffffff0b;padding:20px 4px;margin-top:10px;font-size:11px;color:#d8e0e8}.profile small{font-size:9px;display:block;color:#7c91a4;margin-top:4px}.profile>svg{margin-left:auto;color:#7c91a4}.user-avatar{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#ecdccb;color:#715c4c;font-size:11px;font-weight:600}.user-avatar.small{width:27px;height:27px;font-size:10px}.main-shell{margin-left:192px;width:calc(100% - 192px);min-width:0}.topbar{height:64px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid var(--border);padding:0 30px}.breadcrumb{color:#8b96a5;font-size:11px;display:flex;align-items:center;gap:12px}.breadcrumb span{color:#c8ced5}.breadcrumb strong{font-weight:500;color:#596575}.topbar-right{display:flex;align-items:center;gap:18px}.local-status{display:flex;align-items:center;gap:8px;font-size:10px;color:#7e8998}.topbar-divider{height:16px;width:1px;background:#e9edf0}.icon-button{display:inline-flex;align-items:center;justify-content:center;padding:5px;color:#8d98a7;border-radius:5px;position:relative}.icon-button:hover{background:#f0f3f5;color:#526172}.icon-button i{position:absolute;width:5px;height:5px;background:#dc9d64;border-radius:50%;top:3px;right:4px}.page-content{padding:27px 28px 16px;max-width:1800px;margin:auto}.page-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:25px;gap:15px}.eyebrow{font-size:8px;letter-spacing:2px;color:#91a09e;margin-bottom:8px;font-weight:600}h1{font-size:26px;letter-spacing:-1px;font-weight:630;color:#283746}.page-heading p{font-size:11px;color:#8d98a5;margin-top:9px;letter-spacing:.3px}.primary-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#2b7e68;color:#fff;border:1px solid #2b7e68;border-radius:7px;padding:11px 15px;font-size:11px;font-weight:500;box-shadow:0 2px 3px #1e604b0c;white-space:nowrap}.primary-button:hover{background:#21644f}.primary-button>span{font-size:9px;color:#b6d7ca;margin-left:12px;padding-left:12px;border-left:1px solid #ffffff26}.secondary-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid #e1e6eb;border-radius:6px;background:#fff;padding:9px 12px;font-size:11px;color:#647383;white-space:nowrap}.secondary-button:hover{border-color:#b9c9c1;background:#fafcfb}.secondary-button.compact{padding:7px 10px;font-size:10px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin-bottom:24px}.metric{display:flex;align-items:center;gap:13px;border:1px solid var(--border);border-radius:9px;background:#fff;min-height:89px;padding:17px 19px;box-shadow:0 1px 2px #24354702;text-align:left}.metric small{font-size:10px;color:#8b96a4}.metric strong{display:block;font-size:25px;line-height:1.4;font-weight:600;color:#314051}.metric strong>span{font-size:10px;font-weight:400;color:#98a2ae;margin-left:8px}.metric-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;flex-shrink:0}.mint{background:#eaf5f0;color:#538e79}.peach{background:#fcf1e8;color:#c08e63}.lavender{background:#f0eef9;color:#9188ae}.metric-note{font-size:9px;color:#a5aeb9;margin-left:auto;align-self:flex-end;padding-bottom:5px}.metric-button>svg{margin-left:auto;color:#a3adb9}.metric-button:hover{border-color:#cbdcd3}.workbench{display:grid;grid-template-columns:246px minmax(0,1fr);gap:18px;align-items:start}.task-panel{background:#fff;border:1px solid var(--border);border-radius:9px;overflow:hidden}.panel-heading{display:flex;align-items:center;justify-content:space-between;padding:17px 18px;border-bottom:1px solid #edf0f3;gap:8px;min-height:52px}.panel-heading h2{font-size:11px;font-weight:600;display:flex;align-items:center;gap:7px}.panel-heading h2>svg{color:#8293a0}.panel-heading h2>span{font-size:9px;font-weight:400;background:#f1f3f6;color:#95a0ad;border-radius:4px;padding:2px 5px;margin-left:3px}.task-tabs{display:flex;border-bottom:1px solid #edf0f3;gap:20px;padding:0 17px;height:42px}.task-tabs button{font-size:10px;color:#99a2ad;border-bottom:2px solid transparent;padding:0 2px}.task-tabs button.active{color:#35795f;border-bottom-color:#4c9378}.search{display:flex;align-items:center;gap:7px;border:1px solid #ecf0f3;border-radius:6px;margin:14px 13px 4px;padding:8px;background:#fbfcfd;color:#a2abb7}.search input{width:100%;min-width:0;border:0;outline:0;background:none;font-size:10px}.search>span{font-size:8px;color:#b4bdc6;white-space:nowrap}.task-list{padding:9px 9px 12px;min-height:421px;max-height:740px;overflow-y:auto}.task-card{display:block;width:100%;padding:14px 13px;border:1px solid transparent;border-radius:7px;text-align:left;margin-bottom:5px;background:#fff}.task-card:hover{background:#f8faf9}.task-card.selected{background:#f0f7f3;border-color:#d1e5d9;box-shadow:inset 3px 0 #79a78e}.task-card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}.scene-chip{display:inline-flex;border-radius:4px;padding:3px 6px;font-size:8px;color:#7a8998;background:#f1f4f7;line-height:1.3}.scene-chip.research{color:#5d917d;background:#e8f3ed}.scene-chip.coding{color:#8d85aa;background:#efedf7}.scene-chip.writing{color:#b39171;background:#f8efe6}.provider-label{font-size:8px;color:#a8b0ba;letter-spacing:.1px}.provider-label.codex{color:#51917c;background:#eff8f3;padding:4px 7px;border-radius:4px}.task-card h3{font-size:11px;font-weight:550;color:#435365;line-height:1.65;margin-bottom:5px}.task-card p{font-size:9px;color:#9ba5af;line-height:1.7;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:15px}.task-card-footer{display:flex;align-items:center;justify-content:space-between}.task-card-footer>span:last-child{font-size:9px;display:flex;align-items:center;gap:4px;color:#97a7a3}.status-badge{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#98a2ae;white-space:nowrap}.status-badge.running{color:#5a917e}.status-badge.approval{color:#bb8e59}.status-badge.completed{color:#7a8a94}.status-badge.failed{color:#bd7474}.status-badge.unknown{color:#b0906a}.status-dot{width:5px;height:5px;display:inline-block;border-radius:50%;background:#c3cbd3;flex-shrink:0}.status-dot.running{background:#77ac95;box-shadow:0 0 0 3px #77ac9512}.status-dot.approval{background:#d2a267;box-shadow:0 0 0 3px #d2a26713}.status-dot.completed{background:#92a4ad}.status-dot.failed{background:#c48484}.status-dot.unknown,.status-dot.cancelling{background:#b6a17d}.status-dot.interrupted{background:#a8aeb7}.task-panel-footer{font-size:8px;color:#a4afb9;display:flex;align-items:center;gap:6px;border-top:1px solid #edf0f3;padding:14px 17px}.task-detail{border:1px solid var(--border);border-radius:9px;background:#fff;min-width:0;overflow:hidden}.detail-header{padding:19px 21px 16px;display:flex;align-items:center;gap:15px;justify-content:space-between}.detail-title>.provider-label{margin-left:9px}.detail-title h2{font-size:15px;font-weight:600;margin-top:10px;line-height:1.6}.detail-actions{display:flex;align-items:center;gap:12px}.detail-actions>.status-badge{font-size:9px}.run-strip{display:flex;align-items:center;gap:22px;font-size:9px;color:#98a3ae;padding:10px 21px;background:#fbfcfd;border-top:1px solid #f0f2f4;border-bottom:1px solid #edf0f3}.run-strip>span{display:flex;gap:6px;align-items:center}.run-id{margin-left:auto;font-size:8px;letter-spacing:.5px;color:#b0b8c1}.execution-layout{display:grid;grid-template-columns:minmax(0,1fr) 205px;gap:0;padding:0}.graph-panel{min-width:0;border-right:1px solid #edf0f3}.graph-panel>.panel-heading{border-bottom:0;padding:17px 20px}.live-label{font-size:8px;color:#98a69e;display:flex;align-items:center;gap:6px}.graph-scroll{overflow:auto;width:100%;background:#fcfdfe;scrollbar-width:thin;scrollbar-color:#dfe8e3 transparent}.graph-canvas{position:relative;margin:0 auto}.graph-lines{position:absolute;inset:0}.edge{fill:none;stroke:#d4dfe1;stroke-width:1.3}.edge.active{stroke:#8fbea7;stroke-width:1.5;stroke-dasharray:4 5}.agent-node{position:absolute;width:170px;min-height:115px;border:1px solid #dde4eb;background:#fff;box-shadow:0 3px 8px #35465405;border-radius:8px;text-align:left;padding:10px 12px;z-index:1}.agent-node.selected{border-color:#7fb197;box-shadow:0 0 0 3px #a0c4b318}.agent-node.running{border-color:#a5c7b7}.agent-node.approval{border-color:#dac2a0}.agent-node:hover{box-shadow:0 4px 16px #293f4510}.node-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.node-icon{display:grid;place-items:center;width:26px;height:26px;border-radius:6px;background:#edf4f1;color:#648e7d}.node-icon.tone-1{color:#a99b7d;background:#f7f2e9}.node-icon.tone-2{color:#8991b2;background:#f0f1f8}.node-icon.tone-3{color:#a38da5;background:#f5eff5}.agent-node>strong{font-size:11px;font-weight:600;display:inline-block;color:#435464}.node-role{font-size:8px;color:#a0aab6;margin-left:6px}.node-bottom{margin-top:9px;border-top:1px solid #f0f3f5;padding-top:8px;display:flex;justify-content:space-between;font-size:8px;color:#a6b0ba}.agent-node.running .node-bottom{color:#769a87}.agent-node.approval .node-bottom{color:#b39571}.graph-legend{display:flex;align-items:center;gap:14px;padding:14px 20px;color:#a2acb7;font-size:8px;border-top:1px solid #f0f3f5}.graph-legend>span{display:flex;align-items:center;gap:5px}.legend-dot{width:5px;height:5px;border-radius:50%;background:#8dac9a}.legend-dot.approval{background:#caae83}.legend-dot.completed{background:#a1adb6}.graph-hint{margin-left:auto;color:#b1bac3}.graph-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:13px;color:#9eacb7;font-size:11px}.graph-empty strong{color:#7d8c99;font-size:13px;font-weight:500}.graph-note{position:absolute;bottom:12px;left:20px;font-size:8px;color:#a1abb6}.inspector{padding-bottom:12px;display:flex;flex-direction:column;min-width:0}.inspector>.panel-heading{border-bottom:0;padding:17px 17px}.inspector-avatar{position:relative;display:grid;place-items:center;width:49px;height:49px;background:#edf5f0;color:#638c7a;border-radius:13px;margin:8px 18px 11px}.inspector-avatar>.status-dot{position:absolute;right:-2px;bottom:4px;border:2px solid #fff;width:9px;height:9px}.inspector h3{font-size:13px;font-weight:600;padding:0 18px}.inspector-role{font-size:8px;color:#9da8b3;padding:7px 18px 10px;line-height:1.7}.inspector-role>span{padding:0 4px}.inspector>.status-badge{margin:0 18px;font-size:8px}.inspector-rule{height:1px;background:#edf0f3;margin:17px}.inspector>label{font-size:8px;color:#a2aeb9;padding:0 18px;margin-bottom:7px;letter-spacing:.3px}.inspector-summary{font-size:10px;padding:0 18px;color:#73808e;line-height:1.9;margin-bottom:16px}.inspector-output{font-size:9px;line-height:1.9;color:#9aa6b2;padding:0 18px;max-height:100px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}.inspector-foot{margin:auto 18px 0;padding-top:22px;display:flex;align-items:center;gap:5px;color:#a2afba;font-size:8px}.inspector-empty{margin:auto;text-align:center;color:#a3b0ba;font-size:10px;padding:20px}.inspector-empty p{margin-top:10px}.approval-card{display:flex;align-items:flex-start;gap:13px;border:1px solid #eedfca;background:#fffcf6;border-radius:7px;margin:16px 19px;padding:15px}.approval-icon,.attention-item-icon{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:#bc966a;background:#f8efdF;flex-shrink:0}.approval-eyebrow{font-size:8px;color:#b6a082;letter-spacing:.7px}.approval-card h3{font-size:11px;font-weight:550;margin:4px 0 7px;color:#857258}.approval-card p{font-size:9px;color:#a79985;line-height:1.8}.approval-actions{display:flex;align-items:center;gap:15px;margin-top:13px}.approval-primary{display:inline-flex;align-items:center;gap:8px;background:#a6855d;color:#fff;border-radius:5px;font-size:9px;padding:7px 10px}.approval-primary:hover{background:#8d704d}.text-button{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#a49a8c;padding:5px 0}.text-button:hover{color:#6d8376}.activity-panel{border-top:1px solid #edf0f3}.activity-panel>.panel-heading{border-bottom:0;padding:16px 20px 10px}.subtle{font-size:8px;color:#a3afba}.activity-list{padding:0 20px 12px;max-height:192px;overflow:auto}.activity-row{display:flex;align-items:baseline;gap:9px;font-size:9px;line-height:1.8;margin:8px 0;color:#95a1ad}.activity-row time{font-size:8px;color:#bac2ca;font-variant-numeric:tabular-nums;flex-shrink:0}.activity-row strong{font-size:8px;font-weight:500;color:#7c8d99;flex-shrink:0;width:73px}.activity-row>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-mark{width:4px;height:4px;border-radius:50%;background:#b3c7bc;flex-shrink:0;align-self:center}.activity-mark.approval{background:#d9bd8d}.activity-mark.error{background:#bd8787}.activity-empty{font-size:10px;color:#aab5bf;padding:12px 0 20px}.steer-form{display:flex;align-items:center;gap:9px;margin:2px 19px 17px;padding:8px 11px;background:#f9fafb;border:1px solid #e9edf1;border-radius:6px;color:#a2afba}.steer-form input{background:none;border:0;outline:0;font-size:10px;flex:1;min-width:0}.steer-form button{background:#e9f1ed;color:#598f77;border-radius:5px;width:27px;height:26px;display:grid;place-items:center}.delivery-inline{margin:4px 19px 18px;padding:13px;background:#f3f8f5;border:1px solid #dfece3;border-radius:7px;display:flex;align-items:center;gap:10px}.delivery-icon{color:#6f9b83;display:flex}.delivery-inline>div{flex:1}.delivery-inline strong{font-size:10px;color:#67907a;display:block;margin-bottom:4px}.delivery-inline>div>span{font-size:8px;color:#9daf9f}.page-footer{display:flex;align-items:center;justify-content:space-between;font-size:8px;color:#adb7c2;padding:17px 2px 0}.page-footer>span{display:flex;gap:5px;align-items:center}.page-footer>span>span{padding:0 4px}.collection-panel,.settings-panel{border:1px solid var(--border);border-radius:9px;background:#fff;overflow:hidden;min-height:390px}.large-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:380px;color:#a9b8b1;gap:15px;text-align:center;padding:25px}.large-empty h2{font-size:16px;color:#718378;font-weight:500}.large-empty p{font-size:11px;color:#a4b0a9;line-height:1.8}.empty-list{padding:40px 5px;text-align:center;color:#a6b0b8;font-size:10px}.empty-list p{margin:10px 0}.empty-list button{font-size:10px;text-decoration:underline;color:#6d947f}.attention-item{display:flex;gap:15px;margin:20px;border:1px solid #eee4d5;border-radius:7px;background:#fffdf9;padding:20px}.attention-item h3{font-size:13px;font-weight:500;margin:8px 0;color:#857458}.attention-item p{font-size:11px;color:#a49b8c;line-height:1.8}.artifact-grid{padding:20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:17px}.artifact-card{text-align:left;border:1px solid #e4e9ed;background:#fcfdfd;padding:21px;border-radius:8px;position:relative}.artifact-card:hover{border-color:#b7cfbe;background:#fafdfb}.artifact-file-icon{display:grid;place-items:center;width:49px;height:55px;background:#eef4f0;color:#81a28f;border-radius:7px;margin-bottom:20px}.artifact-card>.provider-label{position:absolute;right:17px;top:20px}.artifact-card h3{font-size:12px;font-weight:500;margin-bottom:7px}.artifact-card p{font-size:10px;color:#95a2ae;line-height:1.7}.artifact-card>div{margin-top:24px;border-top:1px solid #e9eef1;padding-top:12px;display:flex;justify-content:space-between;font-size:9px;color:#a5b0bb}.settings-panel{max-width:980px}.settings-title{display:flex;align-items:center;padding:25px;gap:14px;border-bottom:1px solid #edf0f3}.settings-title h2{font-size:14px;font-weight:500}.settings-title p{font-size:10px;color:#9aa8b2;margin-top:8px}.settings-title>.provider-label{margin-left:auto}.settings-body{padding:0 25px 20px}.settings-line{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid #edf0f3;gap:20px}.settings-line strong{font-size:11px;font-weight:500}.settings-line p{font-size:10px;color:#9da9b4;margin-top:8px;line-height:1.7}.setting-value{font-size:9px;color:#7c9e8a;display:flex;align-items:center;gap:5px;white-space:nowrap}.settings-footnote{display:flex;gap:8px;color:#a2afba;font-size:10px;line-height:1.8;padding:21px 0 0}.settings-footnote>svg{margin-top:2px}.doctor-result{border:1px solid #e5e9ee;border-radius:7px;display:flex;gap:10px;padding:15px;margin-top:15px;font-size:11px;background:#fafbfd;color:#9ba6b2}.doctor-result.success{background:#f3f9f5;border-color:#dbece0;color:#739783}.doctor-result strong{font-size:11px;font-weight:500}.doctor-result p{font-size:10px;margin:7px 0}.doctor-result code{font-size:9px;color:#91a099;overflow-wrap:anywhere}.inline-notice{display:flex;align-items:center;gap:8px;margin:14px 19px;padding:12px;border-radius:6px;background:#fff9ef;color:#a88e67;font-size:10px;line-height:1.7}.settings-body>.inline-notice{margin:16px 0}.modal-backdrop{position:fixed;inset:0;background:#14233465;backdrop-filter:blur(3px);z-index:30;display:flex;align-items:center;justify-content:center;padding:25px}.new-task-modal{background:#fff;width:550px;border:1px solid #e3e8eb;border-radius:13px;box-shadow:0 15px 70px #14273625;max-height:calc(100vh - 50px);overflow:auto}.modal-heading{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f3;padding:20px 23px}.modal-heading>div{display:flex;align-items:center;gap:10px}.modal-heading h2{font-size:14px;font-weight:550}.modal-spark{display:flex;color:#699c83}.modal-body{padding:22px 24px}.modal-description{font-size:11px;color:#99a5b1;margin:0 0 22px;line-height:1.8}.modal-body label{display:block;font-size:10px;color:#728394;margin-bottom:9px}.modal-body label>input,.modal-body label>textarea{display:block;width:100%;margin-top:9px;margin-bottom:18px;border:1px solid #dfe6eb;border-radius:6px;background:#fcfdfd;padding:11px;font-size:11px;line-height:1.8;resize:vertical;outline:0}.scene-choices{display:flex;gap:10px;margin-bottom:21px}.scene-choices button{border:1px solid #e1e8ed;border-radius:6px;flex:1;padding:11px 13px;display:flex;align-items:center;gap:9px;font-size:11px;color:#8b99a8}.scene-choices button>svg{margin-left:auto;color:#699880}.scene-choices button.selected{background:#f1f8f3;border-color:#b9d4c4;color:#6f917d}.provider-choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}.provider-choices button{border:1px solid #e2e8ed;border-radius:6px;padding:13px;display:flex;align-items:center;gap:9px;text-align:left;color:#96a4af}.provider-choices button.selected{background:#f5faf7;border-color:#bed7c7;color:#789b84}.provider-choices strong{font-size:11px;display:block;font-weight:500}.provider-choices small{font-size:8px;display:block;margin-top:5px;color:#a1aea7}.provider-choices button>svg:last-child:not(:first-child){margin-left:auto}.new-task-note{display:flex;align-items:center;gap:7px;font-size:9px;color:#a0afa5;margin-top:18px;line-height:1.8}.modal-footer{padding:17px 24px;display:flex;justify-content:flex-end;align-items:center;gap:10px;background:#fbfcfc;border-top:1px solid #eaf0ed}.modal-footer>span{font-size:9px;color:#a7b2bb;margin-right:auto}.artifact-modal{width:740px;border-radius:12px;background:#fff;overflow:hidden;border:1px solid #e1e7eb}.artifact-modal pre{white-space:pre-wrap;word-break:break-word;padding:25px;font-family:inherit;font-size:12px;line-height:2;color:#72808f;max-height:60vh;overflow-y:auto;margin:0}.toast{position:fixed;bottom:25px;left:calc(50% + 96px);transform:translateX(-50%);z-index:50;background:#253b36;color:#e3eee8;box-shadow:0 4px 25px #12272021;border:1px solid #446055;border-radius:8px;display:flex;align-items:center;gap:10px;padding:13px 16px;font-size:11px;max-width:650px;line-height:1.7}.toast .icon-button{color:#a3bcae}.spin{animation:spin 1.2s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+-@media(max-width:1280px){.sidebar{width:174px;padding-left:11px;padding-right:11px}.main-shell{margin-left:174px;width:calc(100% - 174px)}.page-content{padding:24px 20px 16px}.workbench{grid-template-columns:216px minmax(0,1fr);gap:14px}.execution-layout{grid-template-columns:minmax(0,1fr)}.inspector{display:grid;grid-template-columns:50px 1fr 1fr;gap:7px 12px;padding:15px 18px;border-top:1px solid #edf0f3}.inspector>.panel-heading{display:none}.inspector-avatar{grid-row:1/4;margin:0;align-self:center}.inspector h3{padding:0;grid-column:2}.inspector-role{padding:0;grid-column:2;grid-row:2}.inspector>.status-badge{margin:0;grid-column:2;grid-row:3}.inspector>label,.inspector-rule,.inspector-foot{display:none}.inspector-summary{padding:0;margin:0;grid-column:3;grid-row:1/2;font-size:9px}.inspector-output{padding:0;grid-column:3;grid-row:2/4;max-height:47px;font-size:8px}.graph-panel{border-right:0}.run-strip{gap:15px}.run-id{display:none}.detail-header{align-items:flex-start}.detail-actions{flex-direction:column;gap:10px;padding-top:5px}.metric{padding:16px 14px}.toast{left:calc(50% + 87px)}}
+-@media(max-width:1050px){.sidebar{width:155px}.main-shell{margin-left:155px;width:calc(100% - 155px)}.brand{font-size:21px;gap:6px;padding-left:2px}.brand img{width:33px;height:33px}.brand-sub{font-size:8px}.workspace{font-size:9px;padding:9px 6px}.nav-item{font-size:10px;padding:11px 8px;gap:8px}.workbench{grid-template-columns:190px minmax(0,1fr);gap:11px}.page-content{padding:22px 15px 12px}.page-heading h1{font-size:22px}.primary-button>span{display:none}.metric strong{font-size:21px}.metric-icon{width:30px;height:30px}.metric{gap:9px;padding:12px}.metric-note{display:none}.detail-header{padding:16px}.detail-title h2{font-size:13px}.task-card{padding:13px 10px}.task-tabs{gap:15px}.scene-dot{width:5px;height:5px}.sidebar-bottom .local-card{display:none}.topbar{padding:0 20px}.page-footer{font-size:7px}}
+-@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+-
+-.brand-sub{white-space:nowrap;letter-spacing:.5px;font-size:9px}
+-
+-.real-approval-form{margin-top:12px}.real-approval-form label{display:block;color:#a19582;font-size:9px;margin-bottom:10px}.real-approval-form textarea{display:block;width:100%;min-width:260px;background:#fff;border:1px solid #e9ddc9;border-radius:5px;padding:9px;margin-top:6px;font-size:10px;line-height:1.7;resize:vertical}.real-approval-form button{margin-top:2px}
+-
+-.document-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:#fff;border-radius:14px;overflow:hidden;border:1px solid var(--border);box-shadow:0 24px 100px #243d3526}
+-.document-modal .modal-heading,.document-toolbar,.document-modal .modal-footer{flex-shrink:0}
+-.document-toolbar{display:flex;align-items:center;gap:14px;padding:12px 24px;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
+-.document-tabs{display:flex;gap:4px;margin-right:auto;padding:3px;background:#f3f6f5;border-radius:7px}
+-.document-tabs button{display:flex;align-items:center;gap:7px;padding:7px 16px;border:0;border-radius:5px;background:transparent;color:#7b8b86;cursor:pointer}
+-.document-tabs button[aria-selected=true]{background:white;color:#497b66;box-shadow:0 1px 4px #243d3510}
+-.document-dirty{color:#ad8548}
+-.markdown-body,.document-source{height:55vh;min-height:180px;overflow:auto;margin:0;padding:30px 38px;font-size:14px;line-height:1.85;color:#34443f;overflow-wrap:anywhere}
+-.markdown-body h1{font-size:26px;line-height:1.4;margin:0 0 20px;border-bottom:1px solid #e5ece8;padding-bottom:15px;color:#263c33}
+-.markdown-body h2{font-size:19px;line-height:1.5;margin:27px 0 12px;color:#31483c}
+-.markdown-body h3{font-size:16px;margin:22px 0 10px}
+-.markdown-body p{margin:12px 0}.markdown-body ul,.markdown-body ol{padding-left:24px}.markdown-body li{margin:5px 0}
+-.markdown-body a{color:#428b6c;text-decoration:underline;text-underline-offset:3px}
+-.markdown-body blockquote{border-left:3px solid #9bc5b2;padding:1px 16px;margin:16px 0;color:#718078;background:#f6faf8}
+-.markdown-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f0f5f2;border-radius:4px;padding:2px 5px}
+-.markdown-body pre{white-space:pre;overflow:auto;background:#f4f7f5;border:1px solid #e4ece7;border-radius:8px;padding:16px;line-height:1.65}
+-.markdown-body pre code{padding:0;background:none}.markdown-body table{border-collapse:collapse;display:block;max-width:100%;overflow:auto;margin:18px 0}.markdown-body th,.markdown-body td{border:1px solid #dfe8e2;padding:8px 15px;text-align:left}.markdown-body th{background:#f4f8f5}.markdown-body hr{border:0;border-top:1px solid #e4ece7;margin:25px 0}.markdown-image{color:#87958e;font-size:12px}
+-.document-source{display:block;width:100%;box-sizing:border-box;resize:none;border:0;outline:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#fafcfb;tab-size:2;line-height:1.8}
+-.document-error{padding:10px 24px;background:#fff4f1;color:#af5e4a;font-size:12px;flex-shrink:0}
+-.document-close-confirm{display:flex;align-items:center;gap:8px;padding:16px 24px;background:#fff9ed;border-top:1px solid #eedfbe;flex-shrink:0}.document-close-confirm>div{margin-right:auto}.document-close-confirm strong{font-size:13px;display:block}.document-close-confirm span{display:block;font-size:11px;color:#9b886a;margin-top:5px}
++:root {
++  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Segoe UI", sans-serif;
++  font-size: 13px;
++  font-synthesis: none;
++  color: #1d1d1f;
++  background: #f5f5f7;
++  --canvas: #f5f5f7;
++  --paper: #fff;
++  --sidebar: #ecedef;
++  --ink: #1d1d1f;
++  --muted: #62626b;
++  --border: #e2e3e8;
++  --blue: #007aff;
++  --blue-ink: #005fca;
++  --selection: #e8f1ff;
++  --green: #237a48;
++  --amber: #946000;
++  --red: #ba3535;
++  --sidebar-width: 216px;
++}
++* { box-sizing: border-box; }
++body { margin: 0; }
++button, input, textarea { font: inherit; }
++button { cursor: pointer; border: 0; background: none; color: inherit; transition: background-color .15s, border-color .15s; }
++button:disabled { cursor: not-allowed; opacity: .5; }
++:where(button, a, input, textarea):focus-visible { outline: 3px solid #007aff80; outline-offset: 3px; }
++button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
++p, h1, h2, h3 { margin: 0; }
++svg { flex-shrink: 0; }
++input, textarea { color: var(--ink); }
++input::placeholder, textarea::placeholder { color: #787881; }
++::selection { background: #bcd8ff; }
++.app-shell { display: flex; min-height: 100vh; }
++.sidebar { position: fixed; inset: 0 auto 0 0; z-index: 5; width: var(--sidebar-width); padding: 27px 14px 0; display: flex; flex-direction: column; overflow-y: auto; background: var(--sidebar); border-right: 1px solid #d7d8de; }
++.brand { display: flex; gap: 10px; align-items: center; padding: 0 8px 26px; font-size: 25px; font-weight: 650; letter-spacing: -.7px; }
++.brand img { width: 37px; height: 37px; border-radius: 10px; }
++.brand-sub { display: block; font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--muted); margin-top: 2px; white-space: nowrap; }
++.workspace { display: flex; align-items: center; gap: 10px; margin: 0 5px 28px; font-size: 12px; font-weight: 550; }
++.workspace small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; margin-top: 4px; }
++.workspace-avatar { display: grid; place-items: center; width: 30px; height: 30px; background: #dddfe4; border-radius: 8px; color: #555b65; }
++.nav-section { color: #696973; font-size: 11px; font-weight: 600; padding: 0 12px 9px; }
++.nav-item { width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; padding: 10px 11px; border-radius: 7px; margin-bottom: 3px; font-size: 13px; min-height: 38px; }
++.nav-item > svg { color: #0075e8; stroke-width: 1.7; }
++.nav-item:hover { background: #dfe1e6; }
++.nav-item.active { background: #d6e5fc; color: #0057b7; font-weight: 550; }
++.nav-item > span:last-child:not(.scene-dot) { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 400; }
++.nav-item .attention-count { border-radius: 9px; color: #885000 !important; background: #f5dfa8; min-width: 20px; text-align: center; padding: 2px 5px; }
++.scenes-label { margin-top: 28px; }
++.scene-item { min-height: 34px; padding-left: 13px; color: #52525a; font-size: 12px; }
++.scene-item.selected-scene { background: #dddfe4; color: var(--ink); }
++.scene-dot { width: 7px; height: 7px; border-radius: 50%; background: #8a8a94; display: inline-block; flex-shrink: 0; }
++.scene-dot.research { background: #369278; }
++.scene-dot.coding { background: #8573bc; }
++.scene-dot.writing { background: #b98743; }
++.sidebar-bottom { margin-top: auto; padding-top: 30px; }
++.local-card { padding: 12px 10px 20px; font-size: 11px; color: var(--muted); }
++.local-card strong { font-weight: 500; margin-left: 7px; color: #44444c; }
++.local-card p { margin: 7px 0 0 13px; font-size: 10px; line-height: 1.6; }
++.local-indicator { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #348256; }
++.profile { display: flex; gap: 10px; align-items: center; padding: 18px 9px 22px; margin-top: 12px; border-top: 1px solid #d5d7dc; font-size: 12px; font-weight: 550; }
++.profile img { width: 27px; height: 27px; border-radius: 7px; }
++.profile small { font-size: 10px; display: block; color: var(--muted); font-weight: 400; margin-top: 3px; }
++.main-shell { margin-left: var(--sidebar-width); width: calc(100% - var(--sidebar-width)); min-width: 0; }
++.topbar { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: #ffffffb3; border-bottom: 1px solid var(--border); backdrop-filter: blur(18px); }
++.breadcrumb { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 12px; }
++.breadcrumb span { color: #a6a6af; }
++.breadcrumb strong { color: #45454e; font-weight: 500; }
++.topbar-right { display: flex; align-items: center; gap: 16px; }
++.local-status { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
++.topbar-divider { height: 17px; width: 1px; background: var(--border); }
++.icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 6px; width: 30px; height: 30px; color: var(--muted); border-radius: 6px; position: relative; }
++.icon-button:hover { background: #e9eaee; color: var(--ink); }
++.icon-button i { position: absolute; width: 5px; height: 5px; background: #d58019; border-radius: 50%; top: 4px; right: 5px; }
++.page-content { padding: 26px 26px 16px; max-width: 1900px; margin: auto; }
++.page-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 15px; }
++.page-heading h1 { font-size: 25px; line-height: 1.3; letter-spacing: -.6px; font-weight: 650; }
++.page-heading p { color: var(--muted); font-size: 12px; margin-top: 7px; line-height: 1.6; }
++.primary-button, .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 7px; padding: 9px 13px; font-size: 12px; line-height: 1.4; font-weight: 500; white-space: nowrap; }
++.primary-button { color: #fff; background: var(--blue); border: 1px solid #006fed; }
++.primary-button:hover { background: #0069dd; }
++.primary-button > span { font-size: 10px; color: #fff; opacity: .85; margin-left: 12px; padding-left: 10px; border-left: 1px solid #ffffff40; }
++.secondary-button { background: #fff; color: #45454e; border: 1px solid #d5d6dc; box-shadow: 0 1px 1px #00000004; }
++.secondary-button:hover { background: #f1f2f5; border-color: #b7bbc5; }
++.compact { padding: 6px 10px; font-size: 11px; }
++.workspace-summary { display: flex; align-items: center; gap: 25px; min-height: 39px; margin-bottom: 21px; color: var(--muted); font-size: 12px; }
++.workspace-summary > span, .workspace-summary > button { display: inline-flex; align-items: center; gap: 6px; }
++.workspace-summary > button { padding: 6px 0; }
++.workspace-summary > button:hover { color: var(--blue-ink); }
++.workspace-summary strong { font-weight: 600; color: #45454e; font-variant-numeric: tabular-nums; }
++.summary-note { font-size: 10px; color: #74747d; margin-left: 3px; }
++.workbench { display: grid; grid-template-columns: 262px minmax(0, 1fr); gap: 18px; align-items: start; }
++.task-panel { border: 1px solid var(--border); border-radius: 11px; overflow: hidden; background: #f9f9fb; }
++.panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 17px 18px; gap: 10px; min-height: 54px; border-bottom: 1px solid var(--border); }
++.panel-heading h2 { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
++.panel-heading h2 > svg { color: var(--muted); stroke-width: 1.7; }
++.panel-heading h2 > span { font-size: 11px; font-weight: 400; color: var(--muted); padding: 1px 5px; }
++.task-tabs { display: flex; padding: 3px; margin: 0 14px 12px; gap: 2px; background: #e8e9ee; border-radius: 7px; }
++.task-tabs button { flex: 1; padding: 5px 2px; font-size: 11px; color: #55555f; border-radius: 5px; }
++.task-tabs button.active { background: #fff; color: var(--ink); box-shadow: 0 1px 3px #00000015; }
++.task-panel > .panel-heading { border: 0; }
++.search { display: flex; align-items: center; gap: 7px; margin: 0 14px 12px; padding: 8px 9px; border: 1px solid #dddfe5; background: #fff; border-radius: 7px; color: #797983; }
++.search input { width: 100%; min-width: 0; border: 0; background: none; font-size: 11px; outline: none; }
++.search:focus-within { border-color: var(--blue); box-shadow: 0 0 0 2px #007aff26; }
++.search > span { font-size: 9px; white-space: nowrap; color: #74747f; }
++.task-list { padding: 0 7px 8px; min-height: 450px; max-height: 750px; overflow-y: auto; }
++.task-card { display: block; width: 100%; padding: 14px 12px; border-radius: 8px; text-align: left; margin-bottom: 3px; border: 1px solid transparent; }
++.task-card:hover { background: #eeeff4; }
++.task-card.selected { background: var(--selection); border-color: #caddfa; }
++.task-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
++.scene-chip { display: inline-flex; border-radius: 4px; padding: 2px 5px; font-size: 10px; color: #61616b; background: #efeff4; line-height: 1.4; }
++.scene-chip.research { color: #246d58; background: #e8f2ee; }
++.scene-chip.coding { color: #6b54a0; background: #eeeaf8; }
++.scene-chip.writing { color: #8a622c; background: #f5eddf; }
++.provider-label { font-size: 10px; color: var(--muted); }
++.provider-label.codex { color: var(--blue-ink); background: #edf4ff; padding: 3px 7px; border-radius: 5px; }
++.task-card h3 { font-size: 13px; line-height: 1.6; font-weight: 550; margin-bottom: 5px; overflow-wrap: anywhere; }
++.task-card.selected h3 { color: #004fae; }
++.task-card p { font-size: 11px; color: var(--muted); line-height: 1.7; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 10px; }
++.task-card-footer { display: flex; align-items: center; justify-content: space-between; }
++.task-card-footer > span:last-child { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
++.status-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #62626b; white-space: nowrap; }
++.status-badge.running { color: var(--green); }
++.status-badge.approval, .status-badge.unknown { color: var(--amber); }
++.status-badge.failed { color: var(--red); }
++.status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #9595a0; flex-shrink: 0; }
++.status-dot.running { background: #2f9259; }
++.status-dot.approval, .status-dot.unknown, .status-dot.cancelling { background: #b07a19; }
++.status-dot.completed { background: #747c8b; }
++.status-dot.failed { background: #ce4444; }
++.status-dot.interrupted { background: #8b8b97; }
++.task-panel-footer { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding: 13px 18px; color: var(--muted); font-size: 10px; }
++.task-detail { min-width: 0; border: 1px solid var(--border); border-radius: 11px; background: #fff; overflow: hidden; }
++.detail-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px 23px 19px; }
++.detail-title { min-width: 0; }
++.detail-title > .provider-label { margin-left: 9px; }
++.detail-title h2 { font-size: 18px; font-weight: 600; margin-top: 10px; line-height: 1.5; overflow-wrap: anywhere; }
++.detail-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
++.run-strip { display: flex; align-items: center; gap: 20px; padding: 12px 23px; border-block: 1px solid var(--border); color: var(--muted); font-size: 11px; background: #fbfbfd; }
++.run-strip > span { display: flex; align-items: center; gap: 6px; }
++.run-id { margin-left: auto; font-size: 10px; }
++.execution-layout { display: grid; grid-template-columns: minmax(0, 1fr) 218px; }
++.graph-panel { min-width: 0; border-right: 1px solid var(--border); }
++.graph-panel > .panel-heading { border: 0; padding-inline: 22px; }
++.live-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
++.graph-scroll { width: 100%; overflow: auto; background: #fafbfd; scrollbar-width: thin; scrollbar-color: #cbd0d9 transparent; }
++.graph-canvas { position: relative; margin: 0 auto; }
++.graph-lines { position: absolute; inset: 0; }
++.edge { fill: none; stroke: #c5ccd8; stroke-width: 1.5; }
++.edge.active { stroke: #73a9f4; stroke-width: 1.8; }
++.agent-node { position: absolute; z-index: 1; width: 170px; height: 132px; border: 1px solid #d8dce5; background: #fff; border-radius: 10px; padding: 12px; text-align: left; box-shadow: 0 2px 5px #17254306; }
++.agent-node.selected { border-color: #007aff; box-shadow: 0 0 0 3px #007aff12, 0 3px 9px #17254309; }
++.agent-node:hover { border-color: #8cabd6; }
++.agent-node.selected:hover { border-color: var(--blue); }
++.node-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
++.node-icon { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 6px; background: #edf3fc; color: #5072a1; }
++.agent-node > strong { display: block; font-size: 13px; font-weight: 600; line-height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
++.node-role { display: block; font-size: 10px; color: var(--muted); line-height: 17px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
++.node-bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 7px; padding-top: 6px; border-top: 1px solid #eceef3; font-size: 10px; line-height: 16px; color: #666671; }
++.agent-node.running .node-bottom { color: var(--green); }
++.agent-node.approval .node-bottom { color: var(--amber); }
++.graph-legend { display: flex; align-items: center; gap: 15px; padding: 13px 22px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
++.graph-legend > span { display: flex; align-items: center; gap: 5px; }
++.legend-dot { width: 5px; height: 5px; border-radius: 50%; background: #2f9259; }
++.legend-dot.approval { background: #b07a19; }
++.legend-dot.completed { background: #747c8b; }
++.graph-hint { margin-left: auto; }
++.graph-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; color: var(--muted); font-size: 12px; }
++.graph-empty > svg { color: #909dad; }
++.graph-empty strong { font-size: 15px; font-weight: 500; color: #45454e; }
++.graph-note { position: absolute; bottom: 12px; left: 20px; color: var(--muted); font-size: 10px; }
++.inspector { display: flex; flex-direction: column; min-width: 0; padding-bottom: 18px; background: #fff; }
++.inspector > .panel-heading { border: 0; padding: 17px 20px; }
++.inspector-avatar { position: relative; display: grid; place-items: center; width: 48px; height: 48px; background: #edf3fc; color: #4773b0; border-radius: 12px; margin: 8px 20px 14px; }
++.inspector-avatar > .status-dot { position: absolute; right: -2px; bottom: 3px; width: 10px; height: 10px; border: 2px solid #fff; }
++.inspector h3 { font-size: 16px; font-weight: 600; padding: 0 20px; overflow-wrap: anywhere; }
++.inspector-role { padding: 6px 20px 10px; font-size: 11px; color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
++.inspector-role > span { padding-inline: 3px; }
++.inspector > .status-badge { margin-inline: 20px; }
++.inspector-rule { height: 1px; background: var(--border); margin: 20px; }
++.inspector-label { padding: 0 20px; margin-bottom: 8px; font-size: 11px; font-weight: 500; color: var(--muted); }
++.inspector-summary { padding: 0 20px; margin-bottom: 20px; font-size: 12px; line-height: 1.8; color: #45454e; overflow-wrap: anywhere; }
++.inspector-output { padding: 0 20px; max-height: 130px; overflow-y: auto; font-size: 11px; line-height: 1.8; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
++.inspector-foot { display: flex; align-items: center; gap: 5px; margin: auto 20px 0; padding-top: 24px; color: #74747e; font-size: 10px; }
++.inspector-empty { margin: auto; padding: 20px; text-align: center; color: var(--muted); font-size: 12px; }
++.inspector-empty p { margin-top: 10px; }
++.approval-card { display: flex; align-items: flex-start; gap: 14px; margin: 18px 22px; padding: 17px; background: #fffbf1; border: 1px solid #eddfb9; border-radius: 9px; }
++.approval-card > div { min-width: 0; flex: 1; }
++.approval-icon, .attention-item-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; color: #986414; background: #f7edcf; flex-shrink: 0; }
++.approval-eyebrow { font-size: 11px; color: #90651e; }
++.approval-card h3 { font-size: 13px; font-weight: 600; margin: 5px 0 8px; }
++.approval-card p { color: #746548; font-size: 12px; line-height: 1.8; }
++.approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 15px; margin-top: 15px; }
++.approval-primary { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; background: #98701e; color: #fff; font-size: 12px; font-weight: 500; }
++.approval-primary:hover { background: #805b12; }
++.text-button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 0; color: #7b633c; font-size: 12px; }
++.text-button:hover { color: var(--ink); }
++.activity-panel { border-top: 1px solid var(--border); }
++.activity-panel > .panel-heading { border: 0; padding: 17px 22px 8px; }
++.subtle { font-size: 11px; color: var(--muted); }
++.activity-list { padding: 0 22px 13px; max-height: 180px; overflow: auto; }
++.activity-row { display: flex; align-items: baseline; gap: 10px; font-size: 11px; line-height: 1.9; margin: 8px 0; color: #545461; }
++.activity-row time { color: #747480; font-size: 10px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
++.activity-row strong { width: 78px; flex-shrink: 0; font-size: 11px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.activity-row > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.activity-mark { width: 4px; height: 4px; border-radius: 50%; background: #99a5b8; align-self: center; flex-shrink: 0; }
++.activity-mark.approval { background: #b4872e; }
++.activity-mark.error { background: #cb5050; }
++.activity-empty { padding: 15px 0 20px; font-size: 12px; color: var(--muted); }
++.steer-form { display: flex; align-items: center; gap: 10px; margin: 3px 22px 20px; padding: 9px 10px; border: 1px solid #dadde5; background: #fafbfd; border-radius: 8px; color: #6e7888; }
++.steer-form:focus-within { border-color: var(--blue); }
++.steer-form input { flex: 1; min-width: 0; outline: none; background: none; border: 0; font-size: 12px; }
++.steer-form button { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 6px; color: var(--blue-ink); background: #e7f0ff; }
++.delivery-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 6px 22px 22px; padding: 15px; background: #f4f8fd; border: 1px solid #dce6f6; border-radius: 9px; }
++.delivery-icon { display: flex; color: #3f79bc; }
++.delivery-inline > div { flex: 1; min-width: 150px; }
++.delivery-inline strong { display: block; font-size: 12px; font-weight: 550; margin-bottom: 4px; }
++.delivery-inline > div > span { font-size: 11px; color: var(--muted); }
++.page-footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 18px 2px 0; font-size: 10px; color: #72727d; }
++.page-footer > span { display: flex; align-items: center; gap: 5px; }
++.page-footer > span > span { padding-inline: 4px; }
++.collection-panel, .settings-panel { border: 1px solid var(--border); border-radius: 12px; background: #fff; overflow: hidden; min-height: 420px; }
++.large-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 380px; padding: 30px; gap: 14px; text-align: center; color: #7b8ba2; }
++.large-empty h2 { font-size: 18px; font-weight: 550; color: #45454e; }
++.large-empty p { font-size: 13px; color: var(--muted); line-height: 1.8; }
++.empty-list { padding: 45px 5px; text-align: center; color: var(--muted); font-size: 12px; }
++.empty-list p { margin: 12px 0; }
++.empty-list button { color: var(--blue-ink); font-size: 12px; }
++.attention-item { display: flex; gap: 17px; margin: 22px; padding: 20px; background: #fffcf5; border: 1px solid #ebdfc5; border-radius: 10px; }
++.attention-item > div:last-child { min-width: 0; }
++.attention-item h3 { font-size: 15px; font-weight: 550; margin: 8px 0; }
++.attention-item p { font-size: 12px; color: #71644e; line-height: 1.8; }
++.artifact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 18px; padding: 24px; }
++.artifact-card { position: relative; padding: 21px; border: 1px solid var(--border); border-radius: 10px; background: #fbfbfd; text-align: left; }
++.artifact-card:hover { border-color: #a9c5ec; background: #f6f9fe; }
++.artifact-file-icon { display: grid; place-items: center; width: 46px; height: 54px; border: 1px solid #dce5f4; background: #edf3fc; color: #5883ba; border-radius: 7px; margin-bottom: 20px; }
++.artifact-card > .provider-label { position: absolute; top: 22px; right: 18px; }
++.artifact-card h3 { font-size: 14px; font-weight: 550; line-height: 1.6; margin-bottom: 7px; overflow-wrap: anywhere; }
++.artifact-card p { font-size: 12px; color: var(--muted); line-height: 1.7; }
++.artifact-card > div { display: flex; align-items: center; justify-content: space-between; margin-top: 24px; padding-top: 13px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
++.settings-panel { max-width: 940px; }
++.settings-title { display: flex; align-items: center; gap: 15px; padding: 25px; border-bottom: 1px solid var(--border); }
++.settings-title h2 { font-size: 16px; font-weight: 550; }
++.settings-title p { font-size: 12px; color: var(--muted); margin-top: 7px; line-height: 1.7; }
++.settings-title > .provider-label { margin-left: auto; white-space: nowrap; }
++.metric-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: #edf3fc; color: #527eb9; flex-shrink: 0; }
++.settings-body { padding: 0 25px 23px; }
++.settings-line { display: flex; justify-content: space-between; align-items: center; padding: 23px 0; border-bottom: 1px solid var(--border); gap: 25px; }
++.settings-line strong { font-size: 13px; font-weight: 550; }
++.settings-line p { font-size: 12px; color: var(--muted); margin-top: 7px; line-height: 1.8; max-width: 65ch; }
++.setting-value { display: flex; align-items: center; gap: 6px; color: #505d71; font-size: 11px; white-space: nowrap; }
++.settings-footnote { display: flex; gap: 8px; padding-top: 21px; font-size: 11px; line-height: 1.8; color: var(--muted); }
++.settings-footnote > svg { margin-top: 3px; }
++.doctor-result { display: flex; align-items: flex-start; gap: 11px; padding: 16px; margin-top: 16px; border: 1px solid var(--border); border-radius: 8px; background: #f7f8fb; color: var(--muted); }
++.doctor-result.success { border-color: #cce1d2; background: #f2f8f4; color: #326545; }
++.doctor-result strong { font-size: 12px; font-weight: 550; }
++.doctor-result p { font-size: 11px; margin: 7px 0; }
++.doctor-result code { font-size: 10px; overflow-wrap: anywhere; }
++.inline-notice { display: flex; align-items: flex-start; gap: 9px; padding: 13px 14px; margin: 16px 22px; border-radius: 8px; background: #fff9ec; color: #836027; font-size: 12px; line-height: 1.8; }
++.inline-notice > svg { margin-top: 3px; }
++.settings-body > .inline-notice { margin: 18px 0; }
++.modal-backdrop { position: fixed; inset: 0; z-index: 30; padding: 24px; display: flex; align-items: center; justify-content: center; background: #17213d38; backdrop-filter: blur(9px); }
++.new-task-modal { width: 560px; max-height: calc(100dvh - 48px); overflow: auto; border-radius: 16px; border: 1px solid #ffffffb3; background: #fff; box-shadow: 0 24px 80px #18244038, 0 2px 8px #18244012; }
++.modal-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 19px 24px; border-bottom: 1px solid var(--border); }
++.modal-heading > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
++.modal-heading h2 { font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
++.modal-spark { display: flex; color: var(--blue); }
++.modal-body { padding: 23px 25px; }
++.modal-description { margin-bottom: 23px; font-size: 12px; color: var(--muted); line-height: 1.8; }
++.modal-body label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 10px; }
++.modal-body label > input, .modal-body label > textarea { width: 100%; display: block; padding: 10px 12px; margin: 8px 0 21px; background: #fafbfd; border: 1px solid #d5d8e0; border-radius: 7px; font-size: 13px; font-weight: 400; line-height: 1.7; resize: vertical; }
++.scene-choices { display: flex; gap: 10px; margin-bottom: 23px; }
++.scene-choices button { display: flex; align-items: center; gap: 9px; flex: 1; border: 1px solid #d9dce4; border-radius: 7px; padding: 10px 12px; font-size: 12px; color: #54545f; }
++.scene-choices button > svg { margin-left: auto; color: var(--blue); }
++.scene-choices button.selected { background: var(--selection); border-color: #8dbbf7; color: var(--blue-ink); }
++.provider-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
++.provider-choices button { display: flex; align-items: center; gap: 9px; padding: 13px 12px; border: 1px solid #d9dce4; border-radius: 8px; text-align: left; color: #596275; }
++.provider-choices button.selected { border-color: #8dbbf7; background: var(--selection); color: var(--blue-ink); }
++.provider-choices strong { display: block; font-size: 12px; font-weight: 550; }
++.provider-choices small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.6; }
++.provider-choices button > svg:last-child:not(:first-child) { margin-left: auto; }
++.new-task-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 20px; color: var(--muted); font-size: 11px; line-height: 1.8; }
++.new-task-note > svg { margin-top: 2px; }
++.modal-footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); background: #fafafd; }
++.modal-footer > span { margin-right: auto; font-size: 11px; color: var(--muted); }
++.toast { display: flex; align-items: center; gap: 10px; position: fixed; bottom: 24px; left: calc(50% + var(--sidebar-width) / 2); transform: translateX(-50%); z-index: 50; padding: 12px 14px; max-width: min(650px, calc(100vw - 40px)); background: #ffffffee; border: 1px solid #d4d9e3; border-radius: 11px; color: #343945; box-shadow: 0 8px 35px #1b2c4126; backdrop-filter: blur(18px); font-size: 12px; line-height: 1.7; }
++.toast > svg { color: var(--blue); }
++.real-approval-form { margin-top: 15px; }
++.real-approval-form label { display: block; font-size: 11px; color: #78633e; margin-bottom: 12px; }
++.real-approval-form textarea { display: block; width: 100%; padding: 10px; margin-top: 7px; background: #fff; border: 1px solid #e1d2b5; border-radius: 6px; font-size: 12px; line-height: 1.7; resize: vertical; }
++.document-modal { display: flex; flex-direction: column; width: min(960px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); background: #fff; border-radius: 16px; overflow: hidden; border: 1px solid #ffffffb3; box-shadow: 0 24px 80px #18244038; }
++.document-modal .modal-heading, .document-toolbar, .document-modal .modal-footer { flex-shrink: 0; }
++.document-toolbar { display: flex; align-items: center; gap: 14px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: #fafafd; font-size: 12px; color: var(--muted); }
++.document-tabs { display: flex; gap: 3px; margin-right: auto; padding: 3px; background: #e8e9ef; border-radius: 7px; }
++.document-tabs button { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 5px; color: #595967; font-size: 12px; }
++.document-tabs button[aria-selected=true] { background: #fff; color: var(--ink); box-shadow: 0 1px 3px #00000015; }
++.document-dirty { color: #936109; }
++.markdown-body, .document-source { height: 55vh; min-height: 180px; margin: 0; padding: 30px 38px; overflow: auto; font-size: 14px; line-height: 1.85; color: #303039; overflow-wrap: anywhere; }
++.markdown-body h1 { font-size: 26px; font-weight: 650; line-height: 1.4; margin: 0 0 20px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
++.markdown-body h2 { font-size: 20px; font-weight: 600; line-height: 1.5; margin: 27px 0 12px; }
++.markdown-body h3 { font-size: 16px; font-weight: 600; margin: 22px 0 10px; }
++.markdown-body p { margin: 12px 0; max-width: 80ch; }
++.markdown-body ul, .markdown-body ol { padding-left: 24px; }
++.markdown-body li { margin: 5px 0; }
++.markdown-body a { color: var(--blue-ink); text-decoration: underline; text-underline-offset: 3px; }
++.markdown-body blockquote { border-left: 3px solid #9bbbeb; padding: 1px 16px; margin: 16px 0; background: #f6f8fc; color: var(--muted); }
++.markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: #eff1f6; border-radius: 4px; padding: 2px 5px; }
++.markdown-body pre { white-space: pre; overflow: auto; background: #f7f8fb; border: 1px solid #e1e4ec; border-radius: 8px; padding: 16px; line-height: 1.65; }
++.markdown-body pre code { padding: 0; background: none; }
++.markdown-body table { display: block; border-collapse: collapse; max-width: 100%; overflow: auto; margin: 18px 0; }
++.markdown-body th, .markdown-body td { border: 1px solid #dfe3eb; padding: 8px 15px; text-align: left; }
++.markdown-body th { background: #f4f6fa; }
++.markdown-body hr { border: 0; border-top: 1px solid var(--border); margin: 25px 0; }
++.markdown-image { color: var(--muted); font-size: 12px; }
++.document-source { display: block; width: 100%; resize: none; border: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #fafbfd; tab-size: 2; line-height: 1.8; }
++.document-source:focus-visible { outline-offset: -3px; }
++.document-error { padding: 10px 24px; background: #fff0ee; color: #ac3535; font-size: 12px; flex-shrink: 0; }
++.document-close-confirm { display: flex; align-items: center; gap: 8px; padding: 16px 24px; background: #fff9ec; border-top: 1px solid #e8d8b3; flex-shrink: 0; }
++.document-close-confirm > div { margin-right: auto; }
++.document-close-confirm strong { display: block; font-size: 13px; font-weight: 550; }
++.document-close-confirm span { display: block; font-size: 11px; color: #796543; margin-top: 5px; }
++.spin { animation: spin 1.2s linear infinite; }
++@keyframes spin { to { transform: rotate(360deg); } }
++@media (max-width: 1479px) {
++  .execution-layout { grid-template-columns: minmax(0, 1fr); }
++  .graph-panel { border-right: 0; }
++  .inspector { display: grid; grid-template-columns: 50px minmax(130px, .7fr) minmax(0, 1fr); gap: 6px 15px; padding: 18px 22px; border-top: 1px solid var(--border); }
++  .inspector > .panel-heading, .inspector-rule, .inspector-label, .inspector-foot { display: none; }
++  .inspector-avatar { grid-row: 1/4; margin: 0; align-self: start; }
++  .inspector h3 { grid-column: 2; padding: 0; }
++  .inspector-role { grid-column: 2; grid-row: 2; padding: 0; }
++  .inspector > .status-badge { grid-column: 2; grid-row: 3; margin: 0; }
++  .inspector-summary { grid-column: 3; grid-row: 1; padding: 0; margin: 0; }
++  .inspector-output { grid-column: 3; grid-row: 2/4; padding: 0; max-height: 80px; }
++  .inspector-empty { grid-column: 1/-1; }
++}
++@media (max-width: 1190px) {
++  :root { --sidebar-width: 186px; }
++  .sidebar { padding-inline: 10px; }
++  .brand-sub { font-size: 10px; }
++  .workspace small { font-size: 10px; }
++  .page-content { padding-inline: 20px; }
++  .workbench { grid-template-columns: 232px minmax(0, 1fr); gap: 14px; }
++  .detail-header { flex-wrap: wrap; padding: 20px; }
++  .detail-actions { justify-content: flex-end; margin-left: auto; }
++  .run-strip { gap: 15px; flex-wrap: wrap; padding-inline: 20px; }
++  .run-id { display: none !important; }
++  .task-card { padding: 12px 10px; }
++  .graph-hint { display: none !important; }
++}
++@media (max-width: 900px) {
++  :root { --sidebar-width: 168px; }
++  .brand { gap: 8px; padding-inline: 3px; font-size: 23px; }
++  .brand img { width: 32px; height: 32px; }
++  .brand-sub { font-size: 9px; }
++  .workspace { gap: 7px; font-size: 11px; }
++  .workspace small { display: none; }
++  .nav-item { gap: 8px; font-size: 12px; padding-inline: 8px; }
++  .local-card, .profile { display: none; }
++  .sidebar-bottom { padding-bottom: 20px; }
++  .workbench { grid-template-columns: minmax(0, 1fr); }
++  .task-list { min-height: 0; max-height: 240px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
++  .task-panel-footer { display: none; }
++  .task-tabs { max-width: 300px; }
++  .task-detail { min-width: 0; }
++  .page-content { padding: 22px 18px 16px; }
++  .page-heading h1 { font-size: 23px; }
++  .primary-button > span { display: none; }
++  .workspace-summary { gap: 18px; font-size: 11px; }
++  .summary-note { display: none; }
++  .topbar { padding-inline: 20px; }
++  .page-footer > span:last-child { display: none; }
++}
++@media (max-width: 620px) {
++  .app-shell { display: block; }
++  .sidebar { position: static; width: 100%; padding: 15px 14px 12px; border-right: 0; border-bottom: 1px solid #d7d8de; }
++  .brand { padding: 0 5px 14px; font-size: 23px; }
++  .brand-sub { font-size: 10px; }
++  .workspace, .nav-section, .sidebar > nav[aria-label="场景筛选"], .local-card, .profile { display: none; }
++  .sidebar > nav[aria-label="主导航"] { display: flex; gap: 4px; }
++  .sidebar > nav[aria-label="主导航"] .nav-item { width: auto; flex: 1; justify-content: center; margin: 0; padding: 8px 5px; min-height: 36px; font-size: 11px; gap: 5px; }
++  .nav-item > span:last-child:not(.scene-dot) { margin-left: 1px; font-size: 10px; }
++  .sidebar-bottom { position: absolute; top: 17px; right: 15px; padding: 0; }
++  .sidebar-bottom > .nav-item { width: auto; font-size: 0; padding: 6px; min-height: 30px; }
++  .sidebar-bottom > .nav-item > svg { width: 19px; height: 19px; }
++  .main-shell { margin: 0; width: 100%; }
++  .topbar { height: 44px; padding-inline: 18px; }
++  .breadcrumb { font-size: 11px; gap: 8px; }
++  .topbar-right { gap: 8px; }
++  .topbar-divider, .topbar-right > .icon-button { display: none; }
++  .local-status { font-size: 10px; }
++  .page-content { padding: 20px 14px; }
++  .page-heading { gap: 10px; }
++  .page-heading h1 { font-size: 22px; }
++  .page-heading p { font-size: 11px; }
++  .primary-button { font-size: 11px; padding: 8px 10px; }
++  .workspace-summary { gap: 16px; margin-bottom: 14px; font-size: 11px; flex-wrap: wrap; }
++  .task-list { display: block; max-height: 250px; }
++  .task-card { padding: 12px; }
++  .task-card p { -webkit-line-clamp: 1; }
++  .detail-header { padding: 18px; gap: 15px; }
++  .detail-title h2 { font-size: 17px; }
++  .detail-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 9px; }
++  .run-strip { padding: 11px 18px; gap: 12px; font-size: 10px; }
++  .run-strip > span { gap: 4px; }
++  .graph-panel > .panel-heading { padding-inline: 18px; }
++  .graph-legend { padding-inline: 18px; }
++  .inspector { grid-template-columns: 40px minmax(0, 1fr); padding: 17px 18px; }
++  .inspector-avatar { width: 38px; height: 38px; grid-row: 1/4; }
++  .inspector h3 { font-size: 15px; }
++  .inspector-summary { grid-column: 1/-1; grid-row: 4; margin-top: 9px; }
++  .inspector-output { grid-column: 1/-1; grid-row: 5; max-height: 100px; }
++  .activity-panel > .panel-heading { padding-inline: 18px; }
++  .activity-list { padding-inline: 18px; }
++  .activity-row { gap: 7px; font-size: 10px; }
++  .activity-row strong { width: 65px; font-size: 10px; }
++  .activity-row time { font-size: 9px; }
++  .delivery-inline, .steer-form, .approval-card, .inline-notice { margin-inline: 16px; }
++  .delivery-inline { gap: 10px; }
++  .delivery-inline > .secondary-button { margin-left: auto; }
++  .artifact-grid { padding: 18px; }
++  .collection-panel > .panel-heading .subtle { display: none; }
++  .attention-item { margin: 15px; padding: 15px; gap: 10px; }
++  .settings-title { padding: 20px; gap: 12px; flex-wrap: wrap; }
++  .settings-title > .provider-label { margin-left: 0; }
++  .settings-body { padding-inline: 20px; }
++  .settings-line { align-items: flex-start; gap: 14px; flex-wrap: wrap; }
++  .modal-backdrop { padding: 12px; }
++  .new-task-modal, .document-modal { width: 100%; max-height: calc(100dvh - 24px); border-radius: 13px; }
++  .modal-heading { padding: 17px 18px; }
++  .modal-body { padding: 20px 18px; }
++  .modal-footer { padding: 15px 18px; flex-wrap: wrap; }
++  .provider-choices { grid-template-columns: 1fr; }
++  .document-toolbar { padding: 11px 16px; gap: 8px; flex-wrap: wrap; }
++  .document-tabs button { padding: 6px 10px; }
++  .document-toolbar > span { font-size: 10px; }
++  .document-close-confirm { padding: 14px 16px; flex-wrap: wrap; }
++  .document-close-confirm > div { width: 100%; margin-bottom: 6px; }
++  .markdown-body, .document-source { padding: 23px 20px; height: 52vh; }
++  .markdown-body h1 { font-size: 22px; }
++  .document-modal .modal-footer > span { width: 100%; margin-bottom: 5px; }
++  .toast { left: 50%; min-width: min(320px, calc(100vw - 30px)); }
++}
++@media (prefers-reduced-motion: reduce) {
++  *, *::before, *::after { animation: none !important; transition: none !important; }
++}
+--- a/public/orbit.svg
++++ b/public/orbit.svg
+@@ -1 +1 @@
+-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect x="8" y="8" width="496" height="496" rx="116" fill="#172738"/><ellipse cx="256" cy="256" rx="158" ry="78" fill="none" stroke="#9ef0ce" stroke-width="23" transform="rotate(-36 256 256)"/><ellipse cx="256" cy="256" rx="158" ry="78" fill="none" stroke="#9ef0ce" stroke-width="23" transform="rotate(36 256 256)"/><circle cx="256" cy="256" r="37" fill="#f8fbff"/><circle cx="389" cy="178" r="28" fill="#f2aa77"/></svg>
++<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect x="8" y="8" width="496" height="496" rx="116" fill="#007AFF"/><ellipse cx="256" cy="256" rx="158" ry="78" fill="none" stroke="#ffffff" stroke-width="23" transform="rotate(-36 256 256)"/><ellipse cx="256" cy="256" rx="158" ry="78" fill="none" stroke="#ffffff" stroke-width="23" transform="rotate(36 256 256)"/><circle cx="256" cy="256" r="37" fill="#f8fbff"/><circle cx="389" cy="178" r="28" fill="#b9dcff"/></svg>

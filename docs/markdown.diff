@@ -1,0 +1,557 @@
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,10 +1,11 @@
+ import { useEffect, useRef, useState } from 'react';
+-import { Activity, ArrowDownToLine, ArrowRight, ArrowUpRight, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+-import { applyRuntime, isActive, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
++import { Activity, ArrowRight, ArrowUpRight, Bell, Bot, Check, CheckCircle2, ChevronDown, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, MoreHorizontal, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
++import { applyRuntime, editDocument, isActive, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
+ import type { Approval, Artifact, Provider, Scene, Status, Task } from './model';
+-import { cancelReal, checkCli, createReal, desktop, exportArtifact, loadTasks, replyReal, saveDemo, startReal, steerReal, watchRuntime } from './bridge';
++import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, steerReal, watchRuntime } from './bridge';
+ import type { Doctor } from './bridge';
+ import { Graph } from './Graph';
++import { ArtifactEditor } from './ArtifactEditor';
+ 
+ type View='tasks'|'attention'|'artifacts'|'settings';
+ const time=(n:number)=>new Date(n).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+@@ -20,6 +21,7 @@
+   const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState('');
+   const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
+   const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),lastDemo=useRef('');
++  const currentTasks=useRef(tasks);currentTasks.current=tasks;
+   const task=tasks.find(t=>t.id===selectedId)||tasks[0];
+   const node=task?.nodes.find(n=>n.id===nodeId)||task?.nodes[0];
+   const attention=tasks.flatMap(t=>t.approvals.map(a=>({task:t,approval:a})));
+@@ -37,10 +39,10 @@
+     })().catch(error=>{if(mounted.current){persistence.current=false;setTasks(seedTasks());setLoaded(true);setToast(`记录读取失败：${errorText(error)}`);}});
+     return()=>{mounted.current=false;unlisten?.();};
+   },[]);
+-  useEffect(()=>{if(!loaded||!persistence.current)return;const signature=JSON.stringify(tasks.filter(t=>t.provider==='demo'));if(signature===lastDemo.current)return;lastDemo.current=signature;const snapshot=tasks;saveQueue.current=saveQueue.current.then(()=>saveDemo(snapshot)).catch(error=>{persistence.current=false;setToast(`保存失败：${errorText(error)}`);});},[tasks,loaded]);
++  useEffect(()=>{if(!loaded||!persistence.current)return;const signature=JSON.stringify(tasks.filter(t=>t.provider==='demo'));if(signature===lastDemo.current)return;lastDemo.current=signature;const snapshot=tasks;saveQueue.current=saveQueue.current.then(async()=>{await saveDemo(snapshot);}).catch(error=>{persistence.current=false;setToast(`保存失败：${errorText(error)}`);});},[tasks,loaded]);
+   useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>{setNow(Date.now());setTasks(current=>{const next=current.map(t=>t.provider==='demo'?reduceTask(t,{type:'tick'}):t);return next.some((t,i)=>t!==current[i])?next:current;});},3500);return()=>clearInterval(timer);},[loaded]);
+   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(''),6500);return()=>clearTimeout(timer);},[toast]);
+-  useEffect(()=>{const key=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);setArtifact(null);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[]);
++  useEffect(()=>{const key=(event:KeyboardEvent)=>{if(artifact)return;if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[artifact]);
+ 
+   async function perform(work:()=>Promise<unknown>) {setBusy(true);try{await work();}catch(error){setToast(errorText(error));}finally{setBusy(false);}}
+   function select(t:Task){setSelectedId(t.id);setNodeId(t.nodes[0]?.id||null);setSteer('');}
+@@ -59,6 +61,28 @@
+   async function answer(target:Task,id:string,answers:Record<string,string>){await perform(()=>replyReal(target.runId!,id,answers));}
+   async function inspectCli(){setChecking(true);try{setDoctor(await checkCli());}catch(error){setToast(errorText(error));}finally{setChecking(false);}}
+   async function create(title:string,prompt:string,newScene:Scene,provider:Provider){await perform(async()=>{const next=provider==='codex'?await createReal(title,prompt,newScene):makeTask(title,prompt,newScene,provider);setTasks(current=>[next,...current].slice(0,50));select(next);setView('tasks');setScene('all');setTaskFilter('all');setQuery('');setModal(false);});}
++  async function saveDocument(expected:string,content:string):Promise<Artifact>{
++    const id=artifact!.id;
++    const operation=saveQueue.current.then(async()=>{
++      if(!persistence.current)throw new Error('本地记录无法写入，草稿已保留，请先解决保存问题');
++      let saved:Task;
++      if(desktop)saved=await editArtifact(id,expected,content);
++      else {
++        const current=currentTasks.current;
++        if(current.flatMap(t=>t.artifacts.filter(a=>a.id===id)).length!==1)throw new Error('文档不存在或标识重复，请重新打开');
++        const owner=current.find(t=>t.artifacts.some(a=>a.id===id))!;
++        saved=editDocument(owner,id,expected,content);
++        const persisted=await saveDemo(current.map(t=>t.id===saved.id?saved:t));
++        const stored=persisted?.find(t=>t.id===saved.id);
++        if(!stored||stored.artifacts.find(a=>a.id===id)?.content!==content)throw new Error('文档已更新，请保留草稿并重新打开');
++        saved=stored;
++      }
++      setTasks(current=>current.map(t=>t.id===saved.id&&t.revision<=saved.revision?saved:t));
++      return saved.artifacts.find(a=>a.id===id)!;
++    });
++    saveQueue.current=operation.then(()=>{},()=>{});
++    return operation;
++  }
+   async function download(file:Artifact){if(desktop){await perform(async()=>{await saveQueue.current;const path=await exportArtifact(file.id);setToast(`交付已保存：${path}`);});return;}const url=URL.createObjectURL(new Blob([file.content],{type:'text/plain;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+   const filtered=tasks.filter(t=>(scene==='all'||t.scene===scene)&&(!query||`${t.title} ${t.prompt}`.toLowerCase().includes(query.toLowerCase()))&&(taskFilter==='all'||(taskFilter==='active'?isActive(t.status):t.status==='completed')));
+ 
+@@ -103,7 +127,7 @@
+       </div>
+     </main>
+     {modal&&<NewTask onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
+-    {artifact&&<div className="modal-backdrop" onClick={()=>setArtifact(null)}><section className="artifact-modal" role="dialog" aria-modal="true" aria-label="交付预览" onClick={e=>e.stopPropagation()}><div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭预览" onClick={()=>setArtifact(null)}><X size={19}/></button></div><pre>{artifact.content}</pre><div className="modal-footer"><span>纯文本预览 · 不执行文档内容</span><button className="primary-button" onClick={()=>download(artifact)}><ArrowDownToLine size={15}/>下载文件</button></div></section></div>}
++    {artifact&&<ArtifactEditor key={artifact.id} artifact={artifact} onClose={()=>setArtifact(null)} onSave={saveDocument} onDownload={download}/>}
+     {toast&&<div className="toast" role="status"><CircleHelp size={16}/><span>{toast}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setToast('')}><X size={14}/></button></div>}
+   </div>;
+ }
+--- a/src/bridge.ts
++++ b/src/bridge.ts
+@@ -1,6 +1,6 @@
+ import { invoke, isTauri } from '@tauri-apps/api/core';
+ import { listen } from '@tauri-apps/api/event';
+-import { recoverTasks } from './model';
++import { recoverTasks, mergeDemoSnapshots } from './model';
+ import type { Task } from './model';
+ 
+ export const desktop = isTauri();
+@@ -20,7 +20,13 @@
+ export async function saveDemo(tasks: Task[]) {
+   const demo=tasks.filter(t=>t.provider==='demo').slice(0,50);
+   if(desktop) await invoke('save_demo',{tasks:demo});
+-  else localStorage.setItem(STORAGE_KEY,JSON.stringify(demo));
++  else {
++    const raw=localStorage.getItem(STORAGE_KEY);
++    const stored:Task[]=raw?JSON.parse(raw):[];
++    const merged=mergeDemoSnapshots(demo,stored);
++    localStorage.setItem(STORAGE_KEY,JSON.stringify(merged));
++    return merged;
++  }
+ }
+ export async function watchRuntime(callback:(task:Task)=>void,onWarning:(message:string)=>void) {
+   if(!desktop)return ()=>{};
+@@ -35,3 +41,5 @@
+ export const steerReal=(runId:string,text:string)=>invoke('steer_run',{runId,text});
+ export const cancelReal=(runId:string)=>invoke('interrupt_run',{runId});
+ export const replyReal=(runId:string,approvalId:string,answers:Record<string,string>)=>invoke('reply_input',{runId,approvalId,answers});
++
++export const editArtifact=(artifactId:string,expectedContent:string,content:string)=>invoke<Task>('edit_artifact',{artifactId,expectedContent,content});
+--- a/src/model.ts
++++ b/src/model.ts
+@@ -102,3 +102,17 @@
+   writing={...writing,status:'completed',nodes:demoNodes().map(n=>({...n,status:'completed'})),finishedAt:now-1800000,runId:'demo-writing',revision:5,artifacts:[delivery(writing)]};
+   return [research,coding,writing];
+ }
++
++export function mergeDemoSnapshots(incoming: Task[], stored: Task[]): Task[] {
++  return incoming.map(task=>{const old=stored.find(t=>t.id===task.id);return old&&old.revision>=task.revision?old:task;});
++}
++
++export function editDocument(task:Task,id:string,expected:string,content:string):Task {
++  if(task.provider!=='demo'||!isTerminal(task.status))throw new Error('请等任务结束后再编辑交付物');
++  if(new TextEncoder().encode(content).length>256000)throw new Error('文档超过 256 KB，请缩短后保存');
++  const matches=task.artifacts.filter(a=>a.id===id);
++  if(matches.length!==1)throw new Error('文档不存在或标识重复，请重新打开');
++  if(matches[0].content!==expected)throw new Error('文档已更新，请保留草稿并重新打开');
++  if(content===expected)return task;
++  return log({...task,artifacts:task.artifacts.map(a=>a.id===id?{...a,content}:a)},'已保存 Markdown 修改',Date.now(),'你','artifact');
++}
+--- a/src/model.test.ts
++++ b/src/model.test.ts
+@@ -1,6 +1,6 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+-import { applyRuntime, recoverTasks, reduceTask } from './model.ts';
++import { applyRuntime, editDocument, mergeDemoSnapshots, recoverTasks, reduceTask } from './model.ts';
+ import type { Task } from './model.ts';
+ 
+ function fixture(): Task {
+@@ -41,3 +41,23 @@
+   assert.deepEqual(applyRuntime(done,{...done,revision:2,status:'running'}),done);
+   assert.equal(applyRuntime(done,{...done,revision:2}).revision,2);
+ });
++
++test('Markdown edits reject stale, oversized or running content and retain revisions', () => {
++  const task:Task={...fixture(),status:'completed',artifacts:[{id:'doc',name:'doc.md',kind:'markdown',content:'# Original',createdAt:0}]};
++  const next=editDocument(task,'doc','# Original','# Edited');
++  assert.equal(next.artifacts[0].content,'# Edited');assert.equal(task.artifacts[0].content,'# Original');
++  assert.equal(next.revision,task.revision+1);
++  assert.throws(()=>editDocument(next,'doc','# Original','late'));
++  assert.throws(()=>editDocument(task,'doc','# Original','字'.repeat(85334)));
++  assert.throws(()=>editDocument({...task,status:'running'},'doc','# Original','late'));
++  assert.throws(()=>editDocument({...task,artifacts:[...task.artifacts,...task.artifacts]},'doc','# Original','late'));
++  assert.equal(editDocument(next,'doc','# Edited','# Edited'),next);
++  assert.equal(editDocument(next,'doc','# Edited','').artifacts[0].content,'');
++});
++test('late equal revision demo saves retain the persisted Markdown edit', () => {
++  const task:Task={...fixture(),status:'completed',artifacts:[{id:'doc',name:'doc.md',kind:'markdown',content:'original',createdAt:0}]};
++  const next=editDocument(task,'doc','original','edited');
++  assert.equal(mergeDemoSnapshots([{...task,revision:next.revision}],[next])[0],next);
++  assert.equal(mergeDemoSnapshots([task],[next])[0],next);
++  assert.equal(mergeDemoSnapshots([{...next,revision:next.revision+1}],[next])[0].revision,next.revision+1);
++});
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -7,3 +7,24 @@
+ .brand-sub{white-space:nowrap;letter-spacing:.5px;font-size:9px}
+ 
+ .real-approval-form{margin-top:12px}.real-approval-form label{display:block;color:#a19582;font-size:9px;margin-bottom:10px}.real-approval-form textarea{display:block;width:100%;min-width:260px;background:#fff;border:1px solid #e9ddc9;border-radius:5px;padding:9px;margin-top:6px;font-size:10px;line-height:1.7;resize:vertical}.real-approval-form button{margin-top:2px}
++
++.document-modal{width:min(960px,calc(100vw - 48px));max-height:calc(100vh - 48px);display:flex;flex-direction:column;background:#fff;border-radius:14px;overflow:hidden;border:1px solid var(--border);box-shadow:0 24px 100px #243d3526}
++.document-modal .modal-heading,.document-toolbar,.document-modal .modal-footer{flex-shrink:0}
++.document-toolbar{display:flex;align-items:center;gap:14px;padding:12px 24px;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
++.document-tabs{display:flex;gap:4px;margin-right:auto;padding:3px;background:#f3f6f5;border-radius:7px}
++.document-tabs button{display:flex;align-items:center;gap:7px;padding:7px 16px;border:0;border-radius:5px;background:transparent;color:#7b8b86;cursor:pointer}
++.document-tabs button[aria-selected=true]{background:white;color:#497b66;box-shadow:0 1px 4px #243d3510}
++.document-dirty{color:#ad8548}
++.markdown-body,.document-source{height:55vh;min-height:180px;overflow:auto;margin:0;padding:30px 38px;font-size:14px;line-height:1.85;color:#34443f;overflow-wrap:anywhere}
++.markdown-body h1{font-size:26px;line-height:1.4;margin:0 0 20px;border-bottom:1px solid #e5ece8;padding-bottom:15px;color:#263c33}
++.markdown-body h2{font-size:19px;line-height:1.5;margin:27px 0 12px;color:#31483c}
++.markdown-body h3{font-size:16px;margin:22px 0 10px}
++.markdown-body p{margin:12px 0}.markdown-body ul,.markdown-body ol{padding-left:24px}.markdown-body li{margin:5px 0}
++.markdown-body a{color:#428b6c;text-decoration:underline;text-underline-offset:3px}
++.markdown-body blockquote{border-left:3px solid #9bc5b2;padding:1px 16px;margin:16px 0;color:#718078;background:#f6faf8}
++.markdown-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f0f5f2;border-radius:4px;padding:2px 5px}
++.markdown-body pre{white-space:pre;overflow:auto;background:#f4f7f5;border:1px solid #e4ece7;border-radius:8px;padding:16px;line-height:1.65}
++.markdown-body pre code{padding:0;background:none}.markdown-body table{border-collapse:collapse;display:block;max-width:100%;overflow:auto;margin:18px 0}.markdown-body th,.markdown-body td{border:1px solid #dfe8e2;padding:8px 15px;text-align:left}.markdown-body th{background:#f4f8f5}.markdown-body hr{border:0;border-top:1px solid #e4ece7;margin:25px 0}.markdown-image{color:#87958e;font-size:12px}
++.document-source{display:block;width:100%;box-sizing:border-box;resize:none;border:0;outline:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#fafcfb;tab-size:2;line-height:1.8}
++.document-error{padding:10px 24px;background:#fff4f1;color:#af5e4a;font-size:12px;flex-shrink:0}
++.document-close-confirm{display:flex;align-items:center;gap:8px;padding:16px 24px;background:#fff9ed;border-top:1px solid #eedfbe;flex-shrink:0}.document-close-confirm>div{margin-right:auto}.document-close-confirm strong{font-size:13px;display:block}.document-close-confirm span{display:block;font-size:11px;color:#9b886a;margin-top:5px}
+--- a/src-tauri/src/store.rs
++++ b/src-tauri/src/store.rs
+@@ -110,8 +110,57 @@
+         if tasks.iter().any(|t| real.iter().any(|r| r.id == t.id)) {
+             return Err("演示任务 ID 与真实任务冲突".into());
+         }
+-        data.tasks = real.into_iter().chain(tasks).take(50).collect();
+-        self.persist(&data)
++        let demos = tasks.into_iter().map(|incoming| {
++            data.tasks
++                .iter()
++                .find(|old| old.id == incoming.id && old.revision >= incoming.revision)
++                .cloned()
++                .unwrap_or(incoming)
++        });
++        let mut candidate = data.clone();
++        candidate.tasks = real.into_iter().chain(demos).take(50).collect();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(())
++    }
++    pub fn edit_artifact(&self, id: &str, expected: &str, content: &str) -> Result<Task, String> {
++        if content.len() > 256000 {
++            return Err("文档超过 256 KB，请缩短后保存".into());
++        }
++        let mut data = self.data.lock().unwrap();
++        let matches: Vec<_> = data
++            .tasks
++            .iter()
++            .enumerate()
++            .flat_map(|(ti, t)| {
++                t.artifacts
++                    .iter()
++                    .enumerate()
++                    .filter(move |(_, a)| a.id == id)
++                    .map(move |(ai, _)| (ti, ai))
++            })
++            .collect();
++        if matches.len() != 1 {
++            return Err("文档不存在或标识重复，请重新打开".into());
++        }
++        let (ti, ai) = matches[0];
++        let task = &data.tasks[ti];
++        if !task.terminal() {
++            return Err("请等任务结束后再编辑交付物".into());
++        }
++        if task.artifacts[ai].content != expected {
++            return Err("文档已更新，请保留草稿并重新打开".into());
++        }
++        if content == expected {
++            return Ok(task.clone());
++        }
++        let mut candidate = data.clone();
++        candidate.tasks[ti].artifacts[ai].content = content.into();
++        candidate.tasks[ti].event("已保存 Markdown 修改", "artifact", "你");
++        let saved = candidate.tasks[ti].clone();
++        self.persist(&candidate)?;
++        *data = candidate;
++        Ok(saved)
+     }
+     pub fn export_artifact(&self, id: &str) -> Result<String, String> {
+         let data = self.data.lock().unwrap();
+@@ -225,6 +274,90 @@
+     fn directory() -> PathBuf {
+         std::env::temp_dir().join(format!("orbit-store-test-{}", uuid::Uuid::new_v4()))
+     }
++    fn document() -> Task {
++        let mut task = Task::new("Doc".into(), "Doc".into(), "writing".into());
++        task.status = "completed".into();
++        task.artifacts.push(crate::model::Artifact {
++            id: "doc".into(),
++            name: "doc.md".into(),
++            kind: "markdown".into(),
++            content: "# Original".into(),
++            created_at: 0,
++        });
++        task
++    }
++    #[test]
++    fn edits_persist_export_and_reject_stale_or_ambiguous_content() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let task = document();
++        store.save_task(task.clone()).unwrap();
++        let next = store
++            .edit_artifact("doc", "# Original", "# Edited")
++            .unwrap();
++        assert_eq!(next.status, "completed");
++        assert!(next.revision > task.revision);
++        assert!(store.edit_artifact("doc", "# Original", "stale").is_err());
++        assert_eq!(
++            fs::read_to_string(store.export_artifact("doc").unwrap()).unwrap(),
++            "# Edited"
++        );
++        assert_eq!(
++            Store::open(directory.clone())
++                .unwrap()
++                .task(&task.id)
++                .unwrap()
++                .artifacts[0]
++                .content,
++            "# Edited"
++        );
++        let mut other = document();
++        other.id = "other".into();
++        store.save_task(other).unwrap();
++        assert!(store.edit_artifact("doc", "# Edited", "ambiguous").is_err());
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn failed_edit_does_not_commit_and_utf8_limits_are_bytes() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let task = document();
++        store.save_task(task.clone()).unwrap();
++        assert!(store
++            .edit_artifact("doc", "# Original", &"字".repeat(85334))
++            .is_err());
++        fs::create_dir(directory.join("workspace.tmp")).unwrap();
++        assert!(store.edit_artifact("doc", "# Original", "new").is_err());
++        assert_eq!(
++            store.task(&task.id).unwrap().artifacts[0].content,
++            "# Original"
++        );
++        fs::remove_dir(directory.join("workspace.tmp")).unwrap();
++        assert_eq!(
++            store
++                .edit_artifact("doc", "# Original", "")
++                .unwrap()
++                .artifacts[0]
++                .content,
++            ""
++        );
++        fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
++    fn late_demo_snapshot_with_same_revision_cannot_erase_edit() {
++        let directory = directory();
++        let store = Store::open(directory.clone()).unwrap();
++        let mut task = document();
++        task.provider = "demo".into();
++        store.save_demo(vec![task.clone()]).unwrap();
++        let edited = store
++            .edit_artifact("doc", "# Original", "# Edited")
++            .unwrap();
++        task.revision = edited.revision;
++        store.save_demo(vec![task]).unwrap();
++        assert_eq!(store.workspace().tasks[0].artifacts[0].content, "# Edited");
++        fs::remove_dir_all(directory).unwrap();
++    }
+     #[test]
+     fn late_snapshot_cannot_replace_newer_state_and_restart_marks_unknown() {
+         let directory = directory();
+--- a/src-tauri/src/runner.rs
++++ b/src-tauri/src/runner.rs
+@@ -150,6 +150,47 @@
+     #[cfg(unix)]
+     fn cleanup_descendant_ignoring_term() {
+         check_group_cleanup(false);
++    }
++    #[test]
++    #[cfg(unix)]
++    fn saved_document_survives_shutdown_and_open_runs_reject_edits() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-document-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let mut run = fake_run();
++        run.task.status = "completed".into();
++        run.task.artifacts.push(crate::model::Artifact {
++            id: "doc".into(),
++            name: "doc.md".into(),
++            kind: "markdown".into(),
++            content: "original".into(),
++            created_at: 0,
++        });
++        runtime.store.save_task(run.task.clone()).unwrap();
++        let run = Arc::new(Mutex::new(run));
++        runtime
++            .runs
++            .lock()
++            .unwrap()
++            .insert("run".into(), run.clone());
++        assert!(runtime
++            .edit_artifact("doc".into(), "original".into(), "edited".into())
++            .is_err());
++        {
++            let mut r = run.lock().unwrap();
++            r.child.stop().unwrap();
++            r.closed = true;
++        }
++        runtime
++            .edit_artifact("doc".into(), "original".into(), "edited".into())
++            .unwrap();
++        assert_eq!(run.lock().unwrap().task.artifacts[0].content, "edited");
++        runtime.shutdown();
++        assert_eq!(
++            Store::open(directory.clone()).unwrap().workspace().tasks[0].artifacts[0].content,
++            "edited"
++        );
++        std::fs::remove_dir_all(directory).unwrap();
+     }
+     fn fake_run() -> Run {
+         use std::os::unix::process::CommandExt;
+@@ -662,6 +703,39 @@
+             Err("工作台正在关闭，不能启动新任务".into())
+         } else {
+             Ok(guard)
++        }
++    }
++    pub fn edit_artifact(
++        &self,
++        id: String,
++        expected: String,
++        content: String,
++    ) -> Result<Task, String> {
++        let _lifecycle = self.begin_start()?;
++        let matching = self
++            .runs
++            .lock()
++            .unwrap()
++            .values()
++            .find(|run| {
++                run.lock()
++                    .unwrap()
++                    .task
++                    .artifacts
++                    .iter()
++                    .any(|a| a.id == id)
++            })
++            .cloned();
++        if let Some(run) = matching {
++            let mut r = run.lock().unwrap();
++            if !r.closed {
++                return Err("执行器仍在结束中，请稍后保存".into());
++            }
++            let saved = self.store.edit_artifact(&id, &expected, &content)?;
++            r.task = saved.clone();
++            Ok(saved)
++        } else {
++            self.store.edit_artifact(&id, &expected, &content)
+         }
+     }
+     fn ensure_idle(&self) -> Result<(), String> {
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -21,6 +21,15 @@
+     #[tauri::command]
+     fn save_demo(runtime: State<Runtime>, tasks: Vec<Task>) -> Result<(), String> {
+         runtime.store.save_demo(tasks)
++    }
++    #[tauri::command]
++    fn edit_artifact(
++        runtime: State<Runtime>,
++        artifact_id: String,
++        expected_content: String,
++        content: String,
++    ) -> Result<Task, String> {
++        runtime.edit_artifact(artifact_id, expected_content, content)
+     }
+     #[tauri::command]
+     fn export_artifact(runtime: State<Runtime>, artifact_id: String) -> Result<String, String> {
+@@ -102,6 +111,7 @@
+                 load_workspace,
+                 save_demo,
+                 export_artifact,
++                edit_artifact,
+                 doctor,
+                 create_task,
+                 start_run,
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # Orbit · 个人 Agent 工作台
+ 
+-Tauri 2 + React + TypeScript + Rust 的本地桌面原型。支持调研、编程、写作任务；任务列表、动态 Agent 关系图、待介入、运行记录与纯文本交付。
++Tauri 2 + React + TypeScript + Rust 的本地桌面原型。支持调研、编程、写作任务；任务列表、动态 Agent 关系图、待介入、运行记录与 Markdown 交付。
+ 
+ ## 运行
+ 
+@@ -54,7 +54,9 @@
+ 
+ Tauri AppData 下保存 `workspace.json`、`runs/` 和 `exports/`；macOS 通常为 `~/Library/Application Support/local.orbit.agent-workbench/`。快照先写临时文件后原子替换；损坏记录保留且禁止覆盖。任务历史最多保留 50 项，活动最多 100 条，Agent 最多 64 个，单条协议消息最多 1 MiB。
+ 
+-浏览器预览使用本地 localStorage，只提供演示。交付以纯文本展示；浏览器下载文件，桌面导出到自己的 AppData/exports，不提供任意路径写入或 HTML 执行接口。
++浏览器预览使用本地 localStorage，只提供演示。交付物点击即打开 Markdown 预览，支持标题、列表、表格、代码块；切换“编辑”可修改源码，点击“保存”或 ⌘ / Ctrl S 写入本地记录。文档窗口关闭前会提示未保存修改；直接退出整个 App 时请先保存。只允许编辑已结束任务的交付物，单文档上限 256 KB（UTF-8 字节），旧内容冲突或写盘失败会保留草稿并提示。
++
++下载使用已保存版本；浏览器下载文件，桌面导出到自己的 AppData/exports。文档中的原始 HTML 不执行，图片显示占位文字，仅允许 HTTP/HTTPS 和页内链接。没有任意文件路径写入接口。
+ 
+ ## 检查
+ 
+--- a/package.json
++++ b/package.json
+@@ -14,7 +14,9 @@
+     "@tauri-apps/api": "^2.0.0",
+     "lucide-react": "^0.468.0",
+     "react": "^19.0.0",
+-    "react-dom": "^19.0.0"
++    "react-dom": "^19.0.0",
++    "react-markdown": "^10.1.0",
++    "remark-gfm": "^4.0.1"
+   },
+   "devDependencies": {
+     "@tauri-apps/cli": "^2.0.0",
+--- /dev/null
++++ b/src/ArtifactEditor.tsx
+@@ -0,0 +1,49 @@
++import { useEffect, useRef, useState } from 'react';
++import Markdown from 'react-markdown';
++import remarkGfm from 'remark-gfm';
++import { ArrowDownToLine, Code2, Eye, FileText, Loader2, Save, X } from 'lucide-react';
++import type { Artifact } from './model';
++
++export function ArtifactEditor({artifact,onClose,onSave,onDownload}:{artifact:Artifact;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void}) {
++  const [saved,setSaved]=useState(artifact),[draft,setDraft]=useState(artifact.content);
++  const [mode,setMode]=useState<'preview'|'edit'>('preview'),[saving,setSaving]=useState(false),[error,setError]=useState(''),[confirm,setConfirm]=useState(false);
++  const pending=useRef(false),dialog=useRef<HTMLElement>(null);
++  const dirty=draft!==saved.content;
++  function close(){if(pending.current)return;if(dirty)setConfirm(true);else onClose();}
++  async function save(closeAfter=false){
++    if(pending.current)return;
++    if(!dirty){if(closeAfter)onClose();return;}
++    pending.current=true;setSaving(true);setError('');
++    try{const result=await onSave(saved.content,draft);setSaved(result);setDraft(result.content);setConfirm(false);if(closeAfter)onClose();}
++    catch(reason){setError(reason instanceof Error?reason.message:String(reason));}
++    finally{pending.current=false;setSaving(false);}
++  }
++  useEffect(()=>{
++    const previous=document.activeElement instanceof HTMLElement?document.activeElement:null;
++    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
++    return()=>previous?.focus();
++  },[]);
++  useEffect(()=>{
++    const key=(e:KeyboardEvent)=>{
++      if(e.key==='Tab'){
++        const controls=Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],textarea:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex="0"]')||[]).filter(el=>el.offsetParent!==null);
++        const first=controls[0],last=controls[controls.length-1];
++        if(!first){e.preventDefault();return;}
++        if(!dialog.current?.contains(document.activeElement)||(e.shiftKey&&document.activeElement===first)||(!e.shiftKey&&document.activeElement===last)){
++          e.preventDefault();(e.shiftKey?last:first).focus();
++        }
++      }
++      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();if(confirm)setConfirm(false);else close();}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='s'){e.preventDefault();void save();}};
++    window.addEventListener('keydown',key,true);return()=>window.removeEventListener('keydown',key,true);
++  });
++  return <div className="modal-backdrop" onClick={close}>
++    <section ref={dialog} className="document-modal" role="dialog" aria-modal="true" aria-label="Markdown 文档" onClick={e=>e.stopPropagation()}>
++      <div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭文档" disabled={saving} onClick={close}><X size={19}/></button></div>
++      <div className="document-toolbar"><div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div><span className={dirty?'document-dirty':''}>{saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span><button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button></div>
++      {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<article className="markdown-body" aria-label="Markdown 预览"><Markdown skipHtml remarkPlugins={[remarkGfm]} urlTransform={url=>/^https?:\/\//i.test(url)||url.startsWith('#')?url:''} components={{img:({alt})=><span className="markdown-image">[图片：{alt||'未命名'}]</span>,a:({href,children})=>href?<a href={href} target={href.startsWith('#')?undefined:'_blank'} rel="noopener noreferrer">{children}</a>:<span>{children}</span>}}>{draft}</Markdown></article>}
++      {error&&<div className="document-error" role="alert">{error}</div>}
++      {confirm&&<div className="document-close-confirm" role="alertdialog" aria-label="未保存修改"><div><strong>保存修改后关闭？</strong><span>你的修改尚未保存到本地。</span></div><button className="secondary-button compact" disabled={saving} onClick={()=>setConfirm(false)}>继续编辑</button><button className="secondary-button compact" disabled={saving} onClick={onClose}>丢弃并关闭</button><button className="primary-button compact" disabled={saving} onClick={()=>void save(true)}>保存并关闭</button></div>}
++      <div className="modal-footer"><span>Markdown · ⌘ / Ctrl S 保存</span><button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
++    </section>
++  </div>;
++}
+--- /dev/null
++++ b/docs/markdown-plan.md
+@@ -0,0 +1,11 @@
++# Markdown preview and editing
++
++Scope authorized by user: open existing Markdown deliverables in the workbench, render preview, edit source, save locally, and export the saved revision. One editor component; unchanged task DTO. Dialog close/backdrop/Escape share unsaved-change confirmation; native App termination is outside this dialog confirmation scope.
++
++Architect A reviewed the candidate. Required decisions incorporated: serialized explicit saves with propagated errors; strict revision admission for demo snapshots; Runtime lock order starting → runs → Run → Store; CAS with exact unique artifact ownership and terminal task; clone/persist/commit; drafts separate from confirmed saved content.
++
++1. Store and Runtime: implement edit_artifact(id, expected_content, content) returning Task. Limit UTF-8 content to 256000 bytes, allow empty content, reject missing/ambiguous/stale/in-flight edits. Persist atomically before changing memory; synchronize closed Run snapshot. Add tests for stale CAS, ambiguous ID, failed write, late same-revision demo save, and shutdown retaining edits.
++2. UI: react-markdown + remark-gfm, skip HTML, suppress images, permit only http/https/hash links. Open deliverable preview; editor textarea with explicit save; queue operations against latest tasks, success-only baseline update; dirty-dialog close confirmation and saved-version export. Browser/demo revision guards prevent queued snapshots overwriting edits.
++3. Verify rendering and edit/save/reopen through browser UI, full regression, Tauri package, final architect C diff review, then open the result for the user. No model requests needed.
++
++Repo ruling preserved: parent unborn HEAD and unrelated files, no commits/worktree.

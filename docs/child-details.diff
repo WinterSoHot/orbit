@@ -1,0 +1,742 @@
+--- before/src-tauri/src/runner.rs
++++ after/src-tauri/src/runner.rs
+@@ -1,6 +1,9 @@
+ use crate::{
+     model::{now, Approval, Task},
+-    protocol::{error_message, project, read_message, select_model, thread_request, ModelChoice},
++    protocol::{
++        error_message, observed_agent_nodes, project, read_message, select_model, thread_request,
++        AgentHistory, AgentRead, ModelChoice,
++    },
+     store::Store,
+ };
+ use serde::Serialize;
+@@ -498,6 +501,73 @@
+         println!("Confirmed turn/completed and text result: OK");
+     }
+     #[test]
++    fn partial_child_transport_failure_retains_success_and_stops_later_reads() {
++        let root: Value =
++            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        let mut task = Task::new("test".into(), "test".into(), "research".into());
++        task.status = "completed".into();
++        task.thread_id = Some(root["id"].as_str().unwrap().into());
++        task.turn_id = Some(root["turns"][0]["id"].as_str().unwrap().into());
++        let nodes = observed_agent_nodes(&task, &root).unwrap();
++        let broken = std::cell::Cell::new(false);
++        let mut count = 0;
++        let data = read_child_details(
++            &nodes,
++            Instant::now() + Duration::from_secs(20),
++            &broken,
++            0,
++            |_, _| {
++                count += 1;
++                if count == 1 {
++                    Ok(json!({"id":"first"}))
++                } else {
++                    broken.set(true);
++                    Err("timeout".into())
++                }
++            },
++        );
++        assert_eq!(count, 2);
++        assert!(data[0].result.is_ok());
++        assert!(data[1].result.is_err());
++        assert!(data[2].result.is_err());
++        let mut calls = 0;
++        let data = read_child_details(
++            &nodes,
++            Instant::now(),
++            &std::cell::Cell::new(false),
++            0,
++            |_, _| {
++                calls += 1;
++                Ok(json!({}))
++            },
++        );
++        assert_eq!(calls, 0);
++        assert!(data.iter().all(|r| r.result.is_err()));
++    }
++    #[test]
++    fn collaboration_sync_waits_for_the_current_lifecycle_section() {
++        let directory =
++            std::env::temp_dir().join(format!("orbit-sync-lock-{}", uuid::Uuid::new_v4()));
++        let runtime = Runtime::new(Store::open(directory.clone()).unwrap());
++        let guard = runtime.begin_start().unwrap();
++        let other = runtime.clone();
++        let (started, ready) = mpsc::channel();
++        let (done, finished) = mpsc::channel();
++        let worker = thread::spawn(move || {
++            started.send(()).unwrap();
++            done.send(other.sync_agents("missing".into())).unwrap();
++        });
++        let began = ready.recv_timeout(Duration::from_secs(3));
++        let blocked = finished.recv_timeout(Duration::from_millis(30));
++        drop(guard);
++        let result = finished.recv_timeout(Duration::from_secs(3));
++        worker.join().unwrap();
++        assert!(began.is_ok());
++        assert!(matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)));
++        assert_eq!(result.unwrap().unwrap_err(), "真实任务不存在");
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++    #[test]
+     #[ignore = "explicit local read-only history check; no inference"]
+     fn local_collaboration_history_without_inference() {
+         let real = std::env::var_os("HOME")
+@@ -522,6 +592,23 @@
+         let saved = runtime.sync_agents(task.id.clone()).unwrap();
+         assert_eq!(saved.nodes.len(), 4);
+         assert!(saved.nodes.iter().all(|n| n.status == "completed"));
++        assert!(
++            saved
++                .nodes
++                .iter()
++                .filter(|n| Some(n.id.as_str()) != saved.thread_id.as_deref())
++                .all(|n| !n.output.trim().is_empty()),
++            "completed child Agent answers were not synchronized"
++        );
++        assert!(saved
++            .nodes
++            .iter()
++            .skip(1)
++            .all(|n| n.detail_turn_count == 2 && n.detail_notice.is_none()));
++        assert_eq!(
++            runtime.sync_agents(task.id.clone()).unwrap().revision,
++            saved.revision
++        );
+         assert_eq!(saved.artifacts[0].content, task.artifacts[0].content);
+         assert_eq!(saved.status, task.status);
+         assert_eq!(runtime.store.task(&task.id).unwrap().nodes.len(), 4);
+@@ -681,9 +768,9 @@
+ }
+ 
+ fn read_agent_history(
+-    thread_id: &str,
++    task: &Task,
+     inspections: &Mutex<Vec<OwnedChild>>,
+-) -> Result<Value, String> {
++) -> Result<AgentHistory, String> {
+     let mut child = OwnedChild::new(command().spawn().map_err(|_| "无法启动 CLI 读取协作记录")?);
+     let stdout = child.child.stdout.take().unwrap();
+     let stderr = child.child.stderr.take().unwrap();
+@@ -703,12 +790,23 @@
+     });
+     let result = (|| {
+         let deadline = Instant::now() + Duration::from_secs(20);
++        let broken = std::cell::Cell::new(false);
+         let receive = |id| -> Result<Value, String> {
+             for _ in 0..128 {
+                 let message = rx
+                     .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+-                    .map_err(|_| "读取协作记录超时，原图保留")??
+-                    .ok_or("CLI 已关闭协作记录连接")?;
++                    .map_err(|_| {
++                        broken.set(true);
++                        "读取协作记录超时"
++                    })?
++                    .map_err(|error| {
++                        broken.set(true);
++                        error
++                    })?
++                    .ok_or_else(|| {
++                        broken.set(true);
++                        "CLI 已关闭协作记录连接"
++                    })?;
+                 if message["id"] == id {
+                     if message.get("error").is_some() {
+                         return Err(format!(
+@@ -719,6 +817,7 @@
+                     return Ok(message["result"].clone());
+                 }
+             }
++            broken.set(true);
+             Err("协作记录通知超过限制，原图保留".into())
+         };
+         let input = child.child.stdin.as_mut().unwrap();
+@@ -727,10 +826,22 @@
+         send(input, &json!({"method":"initialized","params":{}}))?;
+         send(
+             input,
+-            &json!({"id":2,"method":"thread/read","params":{"threadId":thread_id,"includeTurns":true}}),
++            &json!({"id":2,"method":"thread/read","params":{"threadId":task.thread_id,"includeTurns":true}}),
+         )?;
+-        let history = receive(2)?;
+-        Ok(history["thread"].clone())
++        let root = receive(2)?["thread"].clone();
++        let nodes = observed_agent_nodes(task, &root)?;
++        let details = read_child_details(
++            &nodes,
++            deadline,
++            &broken,
++            root.to_string().len(),
++            |node_id, id| {
++                send(input, &json!({"id":id,"method":"thread/read","params":{"threadId":node_id,"includeTurns":true}}))
++                .map_err(|error| { broken.set(true); error })?;
++                Ok(receive(id)?["thread"].clone())
++            },
++        );
++        Ok(AgentHistory { root, details })
+     })();
+     drop(rx);
+     if child.stop().is_err() {
+@@ -738,6 +849,38 @@
+         return Err("协作记录进程清理未确认，原图保留；已阻止新运行".into());
+     }
+     result
++}
++
++fn read_child_details(
++    nodes: &[crate::model::Node],
++    deadline: Instant,
++    broken: &std::cell::Cell<bool>,
++    mut total_bytes: usize,
++    mut read: impl FnMut(&str, u64) -> Result<Value, String>,
++) -> Vec<AgentRead> {
++    nodes
++        .iter()
++        .enumerate()
++        .map(|(i, node)| {
++            let result =
++                if broken.get() || Instant::now() >= deadline || total_bytes >= 8 * 1024 * 1024 {
++                    Err("读取连接或容量已到限制，尚未同步；已有输出保留".into())
++                } else {
++                    read(&node.id, i as u64 + 3).and_then(|value| {
++                        total_bytes += value.to_string().len();
++                        if total_bytes > 8 * 1024 * 1024 {
++                            Err("协作详情超过 8 MiB，已有输出保留".into())
++                        } else {
++                            Ok(value)
++                        }
++                    })
++                };
++            AgentRead {
++                id: node.id.clone(),
++                result,
++            }
++        })
++        .collect()
+ }
+ 
+ pub fn doctor() -> Doctor {
+@@ -847,10 +990,10 @@
+         if !task.terminal() {
+             return Err("请等任务结束后再同步协作记录".into());
+         }
+-        let thread_id = task.thread_id.as_deref().ok_or("任务没有 CLI 会话记录")?;
++        task.thread_id.as_deref().ok_or("任务没有 CLI 会话记录")?;
+         let run_id = task.run_id.as_deref().ok_or("任务没有运行标识")?;
+         let turn_id = task.turn_id.as_deref().ok_or("任务没有本轮标识")?;
+-        let history = read_agent_history(thread_id, &self.inspections)?;
++        let history = read_agent_history(&task, &self.inspections)?;
+         let matching = self.runs.lock().unwrap().get(run_id).cloned();
+         if let Some(run) = matching {
+             let mut r = run.lock().unwrap();
+--- before/src-tauri/src/protocol.rs
++++ after/src-tauri/src/protocol.rs
+@@ -238,6 +238,9 @@
+             output: String::new(),
+             parent_id: None,
+             agent_path: Some(path.into()),
++            detail_notice: None,
++            detail_turn_count: 0,
++            output_truncated: false,
+         });
+     }
+     let node = task.nodes.iter_mut().find(|n| n.id == id).unwrap();
+@@ -291,6 +294,9 @@
+                 output: String::new(),
+                 parent_id: Some(parent.into()),
+                 agent_path: None,
++                detail_notice: None,
++                detail_turn_count: 0,
++                output_truncated: false,
+             });
+         }
+         task.revision += 1;
+@@ -433,6 +439,9 @@
+                                     output: text(state, "message").chars().take(64000).collect(),
+                                     parent_id: parent,
+                                     agent_path: None,
++                                    detail_notice: None,
++                                    detail_turn_count: 0,
++                                    output_truncated: false,
+                                 });
+                             }
+                         }
+@@ -595,6 +604,140 @@
+         "agent",
+         "工作台",
+     );
++    Ok(saved)
++}
++
++pub struct AgentRead {
++    pub id: String,
++    pub result: Result<Value, String>,
++}
++pub struct AgentHistory {
++    pub root: Value,
++    pub details: Vec<AgentRead>,
++}
++pub fn observed_agent_nodes(task: &Task, root: &Value) -> Result<Vec<Node>, String> {
++    let mut fresh = task.clone();
++    fresh
++        .nodes
++        .retain(|n| Some(n.id.as_str()) == task.thread_id.as_deref());
++    Ok(reconcile_agents(&fresh, root)?
++        .nodes
++        .into_iter()
++        .filter(|n| Some(n.id.as_str()) != task.thread_id.as_deref())
++        .collect())
++}
++pub fn reconcile_agent_history(task: &Task, history: &AgentHistory) -> Result<Task, String> {
++    let observed = observed_agent_nodes(task, &history.root)?;
++    let mut saved = reconcile_agents(task, &history.root)?;
++    for read in &history.details {
++        let Some(identity) = observed.iter().find(|n| n.id == read.id) else {
++            continue;
++        };
++        let Some(node) = saved.nodes.iter_mut().find(|n| n.id == read.id) else {
++            continue;
++        };
++        let merged = (|| -> Result<(String, usize, bool, Option<String>), String> {
++            let thread = read.result.as_ref().map_err(Clone::clone)?;
++            if text(thread, "id") != identity.id
++                || identity.parent_id.is_none()
++                || Some(text(thread, "parentThreadId")) != identity.parent_id.as_deref()
++            {
++                return Err("子会话身份或父节点不匹配，原输出保留".into());
++            }
++            if let Some(expected) = identity.agent_path.as_deref() {
++                let path = &thread["source"]["subAgent"]["thread_spawn"]["agent_path"];
++                if path.as_str() != Some(expected) {
++                    return Err("子会话路径不匹配，原输出保留".into());
++                }
++            }
++            let turns = thread["turns"].as_array().ok_or("子会话没有可读取的轮次")?;
++            let mut output = String::new();
++            let mut count = 0;
++            let mut truncated = false;
++            let mut message_ids = std::collections::HashSet::new();
++            // These are this child's historical rounds, not an asserted root-turn association.
++            for (i, turn) in turns.iter().enumerate() {
++                let items = turn["items"]
++                    .as_array()
++                    .ok_or("子会话轮次内容不完整，原输出保留")?;
++                if items
++                    .iter()
++                    .any(|m| text(m, "type") == "agentMessage" && !m["text"].is_string())
++                {
++                    return Err("子会话消息正文不完整，原输出保留".into());
++                }
++                let has_final = items.iter().any(|m| {
++                    text(m, "type") == "agentMessage"
++                        && text(m, "phase") == "final_answer"
++                        && !text(m, "text").trim().is_empty()
++                });
++                let mut round = false;
++                for message in items {
++                    if text(message, "type") != "agentMessage"
++                        || text(message, "text").trim().is_empty()
++                        || (has_final && text(message, "phase") != "final_answer")
++                    {
++                        continue;
++                    }
++                    let id = (text(turn, "id"), text(message, "id"));
++                    if id.0.trim().is_empty() || id.1.trim().is_empty() {
++                        return Err("子会话消息标识不完整，原输出保留".into());
++                    }
++                    if !message_ids.insert(id) {
++                        continue;
++                    }
++                    if !round {
++                        count += 1;
++                        round = true;
++                        let heading = format!(
++                            "{}## 第 {} 轮\n\n",
++                            if output.is_empty() { "" } else { "\n\n" },
++                            i + 1
++                        );
++                        append_bounded(&mut output, &heading);
++                    } else {
++                        append_bounded(&mut output, "\n\n");
++                    }
++                    let text = text(message, "text");
++                    if text.chars().count() > 64000usize.saturating_sub(output.chars().count()) {
++                        truncated = true;
++                    }
++                    append_bounded(&mut output, text);
++                }
++            }
++            if output.trim().is_empty() {
++                return Err("子会话尚无文本输出，已有输出保留".into());
++            }
++            let model = thread["model"]
++                .as_str()
++                .filter(|m| !m.trim().is_empty() && m.len() <= 256)
++                .map(str::to_owned);
++            Ok((output, count, truncated, model))
++        })();
++        match merged {
++            Ok((output, count, truncated, model)) => {
++                node.output = output;
++                node.detail_turn_count = count;
++                node.output_truncated = truncated;
++                node.detail_notice =
++                    truncated.then(|| "输出超过 64,000 字符，仅显示前 64,000 字符".into());
++                if let Some(model) = model {
++                    node.model = model;
++                }
++            }
++            Err(error) => node.detail_notice = Some(error.chars().take(300).collect()),
++        }
++    }
++    // Ignore the intermediate graph event. Commit one revision only when the final projection changes.
++    saved.revision = task.revision;
++    saved.events = task.events.clone();
++    if saved.nodes != task.nodes || saved.agent_activity_ids != task.agent_activity_ids {
++        saved.event(
++            &format!("协作详情已同步：{} 个 Agent", saved.nodes.len()),
++            "agent",
++            "工作台",
++        );
++    }
+     Ok(saved)
+ }
+ 
+@@ -922,6 +1065,121 @@
+         assert_eq!(task.status, "unknown");
+         assert!(task.approvals.is_empty());
+     }
++    fn details_fixture() -> (Task, AgentHistory) {
++        let root: Value =
++            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        let mut task = fixture();
++        task.status = "completed".into();
++        task.thread_id = Some(text(&root, "id").into());
++        task.turn_id = Some(text(&root["turns"][0], "id").into());
++        task.root_node();
++        task.nodes[0].output = "root delivery".into();
++        let mut details = Vec::new();
++        for n in observed_agent_nodes(&task, &root).unwrap() {
++            let child = json!({"id":n.id,"parentThreadId":n.parent_id,"source":{"subAgent":{"thread_spawn":{"agent_path":n.agent_path}}},"turns":[
++                {"id":"round-one","items":[{"type":"agentMessage","id":"comment","phase":"commentary","text":"working"},{"type":"agentMessage","id":"final-one","phase":"final_answer","text":"第一轮回答"}]},
++                {"id":"round-two","items":[{"type":"agentMessage","id":"final-two","phase":"final_answer","text":"第二轮回答"},{"type":"agentMessage","id":"final-two","phase":"final_answer","text":"第二轮回答"}]}]});
++            details.push(AgentRead {
++                id: n.id,
++                result: Ok(child),
++            });
++        }
++        (task, AgentHistory { root, details })
++    }
++    #[test]
++    fn child_history_merges_rounds_once_preserves_root_and_is_idempotent() {
++        let (task, history) = details_fixture();
++        let saved = reconcile_agent_history(&task, &history).unwrap();
++        assert_eq!(saved.status, task.status);
++        assert_eq!(saved.nodes[0], task.nodes[0]);
++        for n in saved.nodes.iter().skip(1) {
++            assert_eq!(n.detail_turn_count, 2);
++            assert_eq!(n.output.matches("第二轮回答").count(), 1);
++            assert!(!n.output.contains("working"));
++            assert!(!n.output_truncated);
++            assert_eq!(n.status, "completed");
++            assert_eq!(n.model, "实际模型未返回");
++        }
++        assert_eq!(
++            reconcile_agent_history(&saved, &history).unwrap().revision,
++            saved.revision
++        );
++    }
++    #[test]
++    fn failed_empty_and_foreign_child_reads_preserve_latest_output() {
++        let (task, mut history) = details_fixture();
++        let mut saved = reconcile_agent_history(&task, &history).unwrap();
++        saved.nodes[1].output = "newest child answer".into();
++        history.details[0].result = Err("读取超时，尚未同步".into());
++        history.details[1].result.as_mut().unwrap()["turns"] = json!([]);
++        history.details[2].result.as_mut().unwrap()["parentThreadId"] = json!("foreign");
++        let next = reconcile_agent_history(&saved, &history).unwrap();
++        for (a, b) in saved.nodes.iter().zip(&next.nodes).skip(1) {
++            assert_eq!(a.output, b.output);
++            assert!(b.detail_notice.is_some());
++        }
++        history.details[0].result = Ok(json!({"id":"foreign"}));
++        let next = reconcile_agent_history(&next, &history).unwrap();
++        assert_eq!(next.nodes[1].output, "newest child answer");
++        assert!(next.nodes[1]
++            .detail_notice
++            .as_deref()
++            .unwrap()
++            .contains("不匹配"));
++        for field in ["items", "id"] {
++            let (_, mut malformed) = details_fixture();
++            malformed.details[0].result.as_mut().unwrap()["turns"][0][field] = Value::Null;
++            let next = reconcile_agent_history(&saved, &malformed).unwrap();
++            assert_eq!(next.nodes[1].output, "newest child answer");
++            assert!(next.nodes[1]
++                .detail_notice
++                .as_deref()
++                .unwrap()
++                .contains("不完整"));
++        }
++        for field in ["text", "id"] {
++            for invalid in [None, Some(Value::Null), Some(json!(42))] {
++                let (_, mut malformed) = details_fixture();
++                let message = malformed.details[0].result.as_mut().unwrap()["turns"][1]["items"][0]
++                    .as_object_mut()
++                    .unwrap();
++                if let Some(value) = invalid {
++                    message.insert(field.into(), value);
++                } else {
++                    message.remove(field);
++                }
++                let next = reconcile_agent_history(&saved, &malformed).unwrap();
++                assert_eq!(next.nodes[1].output, "newest child answer");
++                assert_eq!(
++                    next.nodes[1].detail_turn_count,
++                    saved.nodes[1].detail_turn_count
++                );
++                assert!(next.nodes[1]
++                    .detail_notice
++                    .as_deref()
++                    .unwrap()
++                    .contains("不完整"));
++            }
++        }
++    }
++    #[test]
++    fn child_output_unicode_cap_is_visible_and_path_must_match_exactly() {
++        let (task, mut history) = details_fixture();
++        history.details[0].result.as_mut().unwrap()["turns"][0]["items"][1]["text"] =
++            json!("中".repeat(70000));
++        history.details[1].result.as_mut().unwrap()["source"]["subAgent"]["thread_spawn"]
++            ["agent_path"] = json!("/root/technical-other");
++        let saved = reconcile_agent_history(&task, &history).unwrap();
++        assert_eq!(saved.nodes[1].output.chars().count(), 64000);
++        assert!(saved.nodes[1].output_truncated);
++        assert!(saved.nodes[1].detail_notice.is_some());
++        assert!(saved.nodes[2].output.is_empty());
++        assert!(saved.nodes[2]
++            .detail_notice
++            .as_deref()
++            .unwrap()
++            .contains("路径"));
++    }
+     #[test]
+     fn reader_rejects_truncated_and_oversized_messages() {
+         assert!(read_message(&mut std::io::Cursor::new(b"{\"id\":1}")).is_err());
+--- before/src-tauri/src/store.rs
++++ after/src-tauri/src/store.rs
+@@ -128,7 +128,7 @@
+         id: &str,
+         run_id: &str,
+         turn_id: &str,
+-        history: &serde_json::Value,
++        history: &crate::protocol::AgentHistory,
+     ) -> Result<Task, String> {
+         let mut data = self.data.lock().unwrap();
+         let ti = data
+@@ -140,7 +140,7 @@
+         if task.run_id.as_deref() != Some(run_id) || task.turn_id.as_deref() != Some(turn_id) {
+             return Err("任务已进入新一轮运行，请重新同步".into());
+         }
+-        let saved = crate::protocol::reconcile_agents(task, history)?;
++        let saved = crate::protocol::reconcile_agent_history(task, history)?;
+         if saved.revision == task.revision {
+             return Ok(saved);
+         }
+@@ -380,11 +380,13 @@
+     fn collaboration_sync_is_atomic_preserves_edits_and_rejects_changed_run() {
+         let directory = std::env::temp_dir().join(format!("orbit-sync-{}", uuid::Uuid::new_v4()));
+         let store = Store::open(directory.clone()).unwrap();
+-        let history: serde_json::Value =
+-            serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap();
++        let history = crate::protocol::AgentHistory {
++            root: serde_json::from_str(include_str!("../fixtures/subagent-history.json")).unwrap(),
++            details: vec![],
++        };
+         let mut task = document();
+-        task.thread_id = Some(history["id"].as_str().unwrap().into());
+-        task.turn_id = Some(history["turns"][0]["id"].as_str().unwrap().into());
++        task.thread_id = Some(history.root["id"].as_str().unwrap().into());
++        task.turn_id = Some(history.root["turns"][0]["id"].as_str().unwrap().into());
+         task.root_node();
+         task.nodes[0].status = "completed".into();
+         store.save_task(task.clone()).unwrap();
+--- before/src-tauri/src/model.rs
++++ after/src-tauri/src/model.rs
+@@ -21,6 +21,12 @@
+     pub parent_id: Option<String>,
+     #[serde(default)]
+     pub agent_path: Option<String>,
++    #[serde(default)]
++    pub detail_notice: Option<String>,
++    #[serde(default)]
++    pub detail_turn_count: usize,
++    #[serde(default)]
++    pub output_truncated: bool,
+ }
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -145,6 +151,9 @@
+                         output: String::new(),
+                         parent_id: None,
+                         agent_path: Some("/root".into()),
++                        detail_notice: None,
++                        detail_turn_count: 0,
++                        output_truncated: false,
+                     },
+                 );
+             }
+--- before/src/model.ts
++++ after/src/model.ts
+@@ -1,7 +1,7 @@
+ export type Status = 'queued' | 'running' | 'approval' | 'cancelling' | 'interrupted' | 'completed' | 'failed' | 'unknown';
+ export type Scene = 'research' | 'coding' | 'writing';
+ export type Provider = 'demo' | 'codex';
+-export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null; agentPath?: string | null }
++export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null; agentPath?: string | null; detailNotice?: string | null; detailTurnCount?: number; outputTruncated?: boolean }
+ export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
+ export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[] }
+ export interface Artifact { id: string; name: string; kind: string; content: string; createdAt: number }
+--- before/src/App.tsx
++++ after/src/App.tsx
+@@ -1,11 +1,11 @@
+ import { useEffect, useRef, useState } from 'react';
+ import { Activity, ArrowRight, ArrowUpRight, RefreshCw, Laptop, Bell, Bot, Check, CheckCircle2, CircleHelp, Clock3, Command, FileText, FolderOpen, GitBranch, LayoutDashboard, ListFilter, Loader2, Plus, Search, Send, Settings2, ShieldCheck, Sparkles, Square, Terminal, X, Zap } from 'lucide-react';
+ import { applyRuntime, editDocument, isActive, isTerminal, makeTask, reduceTask, sceneLabels, seedTasks, statusLabels } from './model';
+-import type { Approval, Artifact, Provider, Scene, Status, Task } from './model';
++import type { AgentNode, Approval, Artifact, Provider, Scene, Status, Task } from './model';
+ import { cancelReal, checkCli, createReal, desktop, editArtifact, exportArtifact, loadTasks, replyReal, saveDemo, startReal, syncAgents, steerReal, watchRuntime } from './bridge';
+ import type { Doctor } from './bridge';
+ import { Graph } from './Graph';
+-import { ArtifactEditor } from './ArtifactEditor';
++import { AgentOutput, ArtifactEditor } from './ArtifactEditor';
+ 
+ type View='tasks'|'attention'|'artifacts'|'settings';
+ const time=(n:number)=>new Date(n).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+@@ -18,7 +18,7 @@
+   const [tasks,setTasks]=useState<Task[]>([]),[loaded,setLoaded]=useState(false),[view,setView]=useState<View>('tasks');
+   const [selectedId,setSelectedId]=useState<string|null>(null),[nodeId,setNodeId]=useState<string|null>('lead');
+   const [scene,setScene]=useState<Scene|'all'>('all'),[query,setQuery]=useState(''),[taskFilter,setTaskFilter]=useState<'all'|'active'|'completed'>('all');
+-  const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState('');
++  const [modal,setModal]=useState(false),[artifact,setArtifact]=useState<Artifact|null>(null),[toast,setToast]=useState(''),[agentOutput,setAgentOutput]=useState<AgentNode|null>(null);
+   const [doctor,setDoctor]=useState<Doctor|null>(null),[checking,setChecking]=useState(false),[busy,setBusy]=useState(false),[steer,setSteer]=useState(''),[now,setNow]=useState(Date.now());
+   const persistence=useRef(true),saveQueue=useRef(Promise.resolve()),mounted=useRef(false),lastDemo=useRef('');
+   const currentTasks=useRef(tasks);currentTasks.current=tasks;
+@@ -42,7 +42,7 @@
+   useEffect(()=>{if(!loaded||!persistence.current)return;const signature=JSON.stringify(tasks.filter(t=>t.provider==='demo'));if(signature===lastDemo.current)return;lastDemo.current=signature;const snapshot=tasks;saveQueue.current=saveQueue.current.then(async()=>{await saveDemo(snapshot);}).catch(error=>{persistence.current=false;setToast(`保存失败：${errorText(error)}`);});},[tasks,loaded]);
+   useEffect(()=>{if(!loaded)return;const timer=setInterval(()=>{setNow(Date.now());setTasks(current=>{const next=current.map(t=>t.provider==='demo'?reduceTask(t,{type:'tick'}):t);return next.some((t,i)=>t!==current[i])?next:current;});},3500);return()=>clearInterval(timer);},[loaded]);
+   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(''),6500);return()=>clearTimeout(timer);},[toast]);
+-  useEffect(()=>{const key=(event:KeyboardEvent)=>{if(artifact)return;if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[artifact]);
++  useEffect(()=>{const key=(event:KeyboardEvent)=>{if(artifact||agentOutput)return;if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='n'){event.preventDefault();setModal(true);}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setView('tasks');document.querySelector<HTMLInputElement>('input[aria-label="搜索任务"]')?.focus();}if(event.key==='Escape'){setModal(false);}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[artifact,agentOutput]);
+ 
+   async function perform(work:()=>Promise<unknown>) {setBusy(true);try{await work();}catch(error){setToast(errorText(error));}finally{setBusy(false);}}
+   function select(t:Task){setSelectedId(t.id);setNodeId(t.nodes[0]?.id||null);setSteer('');}
+@@ -114,7 +114,7 @@
+             <div className="run-strip"><span><Clock3 size={13}/>{duration(task,now)}</span><span><Bot size={13}/>{task.nodes.length} 个 Agent</span><span><Activity size={13}/>{task.provider==='demo'?'模拟事件':task.tokens===null?'用量暂不可用':`${task.tokens.toLocaleString()} tokens`}</span><span className="run-id">{task.runId?`运行 ${task.runId.slice(0,8)}`:'尚无运行'}</span></div>
+             {task.status==='unknown'&&<div className="inline-notice"><CircleHelp size={16}/><span>上次运行状态需核对。历史已保留，旧审批已失效；新运行不会自动重试旧工具。</span></div>}
+             <div className="execution-layout"><section className="graph-panel"><div className="panel-heading"><h2><GitBranch size={15}/>Agent 协作</h2><span className="live-label"><span className={`status-dot ${task.status}`}/>{task.provider==='demo'?'演示关系': '已观测关系'}</span></div><Graph nodes={task.nodes} selected={node?.id||null} onSelect={setNodeId}/><div className="graph-legend"><span><i className="legend-dot running"/>运行</span><span><i className="legend-dot approval"/>等待</span><span><i className="legend-dot completed"/>结束</span><span className="graph-hint">点击 Agent 查看详情</span></div></section>
+-              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||'收到执行事件后，输出会显示在这里。'}</p><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
++              <section className="inspector"><div className="panel-heading"><h2>Agent 详情</h2></div>{node?<><div className="inspector-avatar"><Bot size={24}/><span className={`status-dot ${node.status}`}/></div><h3>{node.name}</h3><p className="inspector-role">{node.role} <span>·</span> {node.model}</p><Badge status={node.status}/><div className="inspector-rule"/><span className="inspector-label">当前工作</span><p className="inspector-summary">{node.summary}</p><span className="inspector-label">输出摘要</span><p className="inspector-output">{node.output||(task.provider==='codex'&&node.parentId?(isTerminal(task.status)?'点击“同步协作”读取子会话正文。':'任务结束后，可同步子会话正文。'):'尚无文本输出。')}</p><div className="inspector-detail-actions">{node.agentPath&&<code>{node.agentPath}</code>}{!!node.detailTurnCount&&<span>子会话历史 · {node.detailTurnCount} 轮输出</span>}{node.detailNotice&&<p>{node.detailNotice}</p>}{node.output&&<button className="secondary-button compact" onClick={()=>setAgentOutput(node)}><FileText size={13}/>{node.outputTruncated?'查看输出':'查看完整输出'}</button>}</div><div className="inspector-foot"><ShieldCheck size={13}/>{task.provider==='demo'?'本节点是交互演示':'状态来自执行器事件'}</div></>:<div className="inspector-empty"><Bot size={26}/><p>启动任务后查看 Agent 详情</p></div>}</section></div>
+             {task.approvals.map(a=><div key={a.id} className="approval-card"><span className="approval-icon"><Bell size={19}/></span><div><span className="approval-eyebrow">需要你的判断</span><h3>{a.title}</h3><p>{a.description}</p>{task.provider==='codex'?<RealApprovalForm approval={a} busy={busy} onAnswer={answers=>answer(task,a.id,answers)}/>:<div className="approval-actions"><button className="approval-primary" disabled={busy} onClick={()=>reply(task,a.id,true)}>按建议继续<ArrowRight size={13}/></button><button className="text-button" disabled={busy} onClick={()=>reply(task,a.id,false)}>拒绝并停止</button></div>}</div></div>)}
+             <section className="activity-panel"><div className="panel-heading"><h2><Terminal size={15}/>运行记录</h2><span className="subtle">{task.events.length} 条事件</span></div><div className="activity-list">{task.events.slice(-5).reverse().map(event=><div key={event.id} className="activity-row"><span className={`activity-mark ${event.kind}`}/><time>{time(event.at)}</time><strong>{event.agent}</strong><span>{event.text}</span></div>)}{!task.events.length&&<div className="activity-empty">启动任务后，真实事件或演示事件会记录在这里。</div>}</div>{isActive(task.status)&&<form className="steer-form" onSubmit={e=>{e.preventDefault();sendDirection();}}><Command size={15}/><input aria-label="补充任务方向" placeholder="补充方向，让 Agent 继续推进…" value={steer} maxLength={2000} onChange={e=>setSteer(e.target.value)}/><button aria-label="发送补充方向" disabled={!steer.trim()||busy||task.status==='cancelling'}><Send size={15}/></button></form>}</section>
+             {task.artifacts.length>0&&<div className="delivery-inline"><span className="delivery-icon"><CheckCircle2 size={20}/></span><div><strong>交付已生成</strong><span>可预览、编辑或下载。</span></div>{task.artifacts.map(a=><button key={a.id} className="secondary-button compact" onClick={()=>setArtifact(a)}><FileText size={14}/>查看结果<ArrowUpRight size={13}/></button>)}</div>}
+@@ -128,6 +128,7 @@
+       </div>
+     </main>
+     {modal&&<NewTask onClose={()=>setModal(false)} onCreate={create} busy={busy}/>}
++    {agentOutput&&<AgentOutput node={agentOutput} onClose={()=>setAgentOutput(null)}/> }
+     {artifact&&<ArtifactEditor key={artifact.id} artifact={artifact} onClose={()=>setArtifact(null)} onSave={saveDocument} onDownload={download}/>}
+     {toast&&<div className="toast" role="status"><CircleHelp size={16}/><span>{toast}</span><button className="icon-button" aria-label="关闭提示" onClick={()=>setToast('')}><X size={14}/></button></div>}
+   </div>;
+--- before/src/ArtifactEditor.tsx
++++ after/src/ArtifactEditor.tsx
+@@ -2,7 +2,7 @@
+ import Markdown from 'react-markdown';
+ import remarkGfm from 'remark-gfm';
+ import { ArrowDownToLine, Code2, Eye, FileText, Loader2, Save, X } from 'lucide-react';
+-import type { Artifact } from './model';
++import type { AgentNode, Artifact } from './model';
+ 
+ export function ArtifactEditor({artifact,onClose,onSave,onDownload}:{artifact:Artifact;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void}) {
+   const [saved,setSaved]=useState(artifact),[draft,setDraft]=useState(artifact.content);
+@@ -40,10 +40,40 @@
+     <section ref={dialog} className="document-modal" role="dialog" aria-modal="true" aria-label="Markdown 文档" onClick={e=>e.stopPropagation()}>
+       <div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭文档" disabled={saving} onClick={close}><X size={19}/></button></div>
+       <div className="document-toolbar"><div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div><span className={dirty?'document-dirty':''}>{saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span><button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button></div>
+-      {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<article className="markdown-body" aria-label="Markdown 预览"><Markdown skipHtml remarkPlugins={[remarkGfm]} urlTransform={url=>/^https?:\/\//i.test(url)||url.startsWith('#')?url:''} components={{img:({alt})=><span className="markdown-image">[图片：{alt||'未命名'}]</span>,a:({href,children})=>href?<a href={href} target={href.startsWith('#')?undefined:'_blank'} rel="noopener noreferrer">{children}</a>:<span>{children}</span>}}>{draft}</Markdown></article>}
++      {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<MarkdownBody content={draft}/>}
+       {error&&<div className="document-error" role="alert">{error}</div>}
+       {confirm&&<div className="document-close-confirm" role="alertdialog" aria-label="未保存修改"><div><strong>保存修改后关闭？</strong><span>你的修改尚未保存到本地。</span></div><button className="secondary-button compact" disabled={saving} onClick={()=>setConfirm(false)}>继续编辑</button><button className="secondary-button compact" disabled={saving} onClick={onClose}>丢弃并关闭</button><button className="primary-button compact" disabled={saving} onClick={()=>void save(true)}>保存并关闭</button></div>}
+       <div className="modal-footer"><span>Markdown · ⌘ / Ctrl S 保存</span><button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
+     </section>
+   </div>;
+ }
++
++export function MarkdownBody({content}:{content:string}) {return <article className="markdown-body" aria-label="Markdown 预览"><Markdown skipHtml remarkPlugins={[remarkGfm]} urlTransform={url=>/^https?:\/\//i.test(url)||url.startsWith('#')?url:''} components={{img:({alt})=><span className="markdown-image">[图片：{alt||'未命名'}]</span>,a:({href,children})=>href?<a href={href} target={href.startsWith('#')?undefined:'_blank'} rel="noopener noreferrer">{children}</a>:<span>{children}</span>}}>{content}</Markdown></article>;}
++
++export function AgentOutput({node,onClose}:{node:AgentNode;onClose:()=>void}) {
++  const dialog=useRef<HTMLElement>(null);
++  useEffect(()=>{
++    const previous=document.activeElement instanceof HTMLElement?document.activeElement:null;
++    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus();
++    const key=(event:KeyboardEvent)=>{
++      if(event.key==='Escape'){event.preventDefault();event.stopPropagation();onClose();}
++      if(event.key==='Tab'){
++        const controls=Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href]')||[]).filter(el=>el.offsetParent!==null);
++        const first=controls[0],last=controls[controls.length-1];
++        if(!first){event.preventDefault();return;}
++        if(!dialog.current?.contains(document.activeElement)||(event.shiftKey&&document.activeElement===first)||(!event.shiftKey&&document.activeElement===last)){
++          event.preventDefault();(event.shiftKey?last:first).focus();
++        }
++      }
++    };
++    window.addEventListener('keydown',key,true);
++    return()=>{window.removeEventListener('keydown',key,true);previous?.focus();};
++  },[]);
++  return <div className="modal-backdrop" onClick={onClose}><section ref={dialog} className="document-modal agent-output-modal" role="dialog" aria-modal="true" aria-label={`${node.name} 输出`} onClick={e=>e.stopPropagation()}>
++    <div className="modal-heading"><div><FileText size={19}/><h2>{node.name} 输出</h2></div><button className="icon-button" aria-label="关闭 Agent 输出" onClick={onClose}><X size={19}/></button></div>
++    <div className="document-toolbar"><span>{node.detailTurnCount?`子会话历史 · ${node.detailTurnCount} 轮输出`:'只读输出'}</span>{node.agentPath&&<code>{node.agentPath}</code>}</div>
++    {node.detailNotice&&<div className="agent-output-notice" role="status">{node.detailNotice}</div>}
++    <MarkdownBody content={node.output}/>
++    <div className="modal-footer"><span>{node.outputTruncated?'输出已截断':'来自 Agent 的文本输出'} · 不影响交付文档</span><button className="secondary-button" onClick={onClose}>关闭</button></div>
++  </section></div>;
++}
+--- before/src/styles.css
++++ after/src/styles.css
+@@ -180,6 +180,13 @@
+ .inspector-label { padding: 0 20px; margin-bottom: 8px; font-size: 11px; font-weight: 500; color: var(--muted); }
+ .inspector-summary { padding: 0 20px; margin-bottom: 20px; font-size: 12px; line-height: 1.8; color: #45454e; overflow-wrap: anywhere; }
+ .inspector-output { padding: 0 20px; max-height: 130px; overflow-y: auto; font-size: 11px; line-height: 1.8; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
++.inspector-detail-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin: 16px 20px 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
++.inspector-detail-actions code { font: inherit; overflow-wrap: anywhere; }
++.inspector-detail-actions p, .agent-output-notice { color: #836027; }
++.agent-output-modal .document-toolbar { justify-content: space-between; }
++.agent-output-modal .document-toolbar > span { margin: 0; }
++.agent-output-modal .document-toolbar code { font: inherit; overflow-wrap: anywhere; }
++.agent-output-notice { padding: 11px 24px; background: #fff9ec; font-size: 12px; line-height: 1.8; }
+ .inspector-foot { display: flex; align-items: center; gap: 5px; margin: auto 20px 0; padding-top: 24px; color: #74747e; font-size: 10px; }
+ .inspector-empty { margin: auto; padding: 20px; text-align: center; color: var(--muted); font-size: 12px; }
+ .inspector-empty p { margin-top: 10px; }
+@@ -331,6 +338,7 @@
+   .inspector > .status-badge { grid-column: 2; grid-row: 3; margin: 0; }
+   .inspector-summary { grid-column: 3; grid-row: 1; padding: 0; margin: 0; }
+   .inspector-output { grid-column: 3; grid-row: 2/4; padding: 0; max-height: 80px; }
++  .inspector-detail-actions { grid-column: 1/-1; margin: 8px 0 0; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+   .inspector-empty { grid-column: 1/-1; }
+ }
+ @media (max-width: 1190px) {
+--- before/README.md
++++ after/README.md
+@@ -80,3 +80,7 @@
+ ```sh
+ MACOSX_DEPLOYMENT_TARGET=13.0 cargo test --manifest-path src-tauri/Cargo.toml --lib runner::tests::local_minimal_real_turn_with_catalog_default -- --ignored --nocapture
+ ```
++
++### 子 Agent 详情
++
++已结束任务的“同步协作”会读取本轮已观测子 Agent 的会话历史，显示其文本输出和轮次数；点击“查看完整输出”以只读 Markdown 查看。子会话历史不被推定为根任务当前轮次的全部输出，也不会覆盖主交付。模型名称仅显示接口明确返回的值，当前 CLI 可能不提供。读取失败保留原输出并提示；每节点正文上限 64,000 Unicode 字符，超限明确提示并改为“查看输出”。读取只使用 initialize/thread/read，不启动模型。

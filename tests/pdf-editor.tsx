@@ -1,0 +1,46 @@
+// Isolated integration fixture: real KnowledgeEditor, in-memory bridge; no user data.
+import {useRef,useState} from 'react';import {createRoot} from 'react-dom/client';
+import type {EditorHandle} from '../src/KnowledgeEditor';import type {LibraryDocument,DocumentChange} from '../src/knowledge';
+import data from './pdf-fixture.json';import '../src/styles.css';import '../src/library.css';
+const id='12345678-1234-1234-1234-123456789abc';
+let stored:LibraryDocument={id,kind:'pdf',title:'Editor recovery fixture',tags:[],url:null,content:'',revision:0,createdAt:0,updatedAt:0,draft:null,versions:[],blobId:id,sizeBytes:100,stamp:null,collectionIds:[],deletedAt:null,pdfReader:{revision:1,page:1,scale:1,annotations:[{id:'87654321-4321-4321-4321-cba987654321',page:1,rects:[[40,540,200,570]],text:'Fixture annotation',comment:'Saved comment',color:'yellow'}]}};
+let failure='',readFailure=false,readDelay=0,invalidBounds=false;let handle:EditorHandle|null=null;
+Object.assign(window,{isTauri:true,__TAURI_INTERNALS__:{invoke:async(command:string,args:Record<string,unknown>)=>{
+ if(command==='read_pdf')return data;
+ if(command==='load_library'){if(readDelay)await new Promise(r=>setTimeout(r,readDelay));if(invalidBounds)return {documents:[{...structuredClone(stored),pdfReader:{...stored.pdfReader!,annotations:stored.pdfReader!.annotations.map(a=>({...a,page:999}))}}],error:null};if(readFailure)throw Error('Fixture read failed');return {documents:[structuredClone(stored)],collections:[],groups:[],schemaVersion:3,error:null};}
+ if(command==='save_pdf_reader'){if(failure)throw Error(failure);const value=args.value as NonNullable<LibraryDocument['pdfReader']>;if(value.revision!==stored.pdfReader!.revision)throw Error('CAS conflict');stored={...stored,pdfReader:{...structuredClone(value),revision:value.revision+1}};return structuredClone(stored.pdfReader);}
+ if(command==='change_document'){const change=args.change as DocumentChange;if(change.expectedRevision!==stored.revision)throw Error('Body conflict');stored={...stored,revision:stored.revision+1,content:change.operation==='draft'?stored.content:change.content,draft:change.operation==='draft'?{content:change.content,at:Date.now()}:null};return structuredClone(stored);}
+ throw Error(`Unexpected fixture command ${command}`);
+}}});
+const {KnowledgeEditor}=await import('../src/KnowledgeEditor');
+function App(){const ref=useRef<EditorHandle>(null),[doc,setDoc]=useState(stored);handle=ref.current;return <main style={{margin:20}}><KnowledgeEditor ref={v=>{ref.current=v;handle=v;}} document={doc} documents={[doc,{...doc,id:'11111111-1111-4111-8111-111111111111',kind:'markdown',title:'Link target',pdfReader:null}]} onSaved={setDoc} onNavigate={()=>{}} onNotice={()=>{}}/></main>;}
+createRoot(document.getElementById('root')!).render(<App/>);
+const wait=async(predicate:()=>unknown,label:string)=>{for(let i=0;i<160;i++){if(predicate())return;await new Promise(r=>setTimeout(r,100));}throw Error(`Timeout ${label}`);};
+const click=(label:string)=>{const target=Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(b=>b.textContent?.trim()===label);if(!target)throw Error(`Missing ${label}`);target.click();};
+const input=(element:HTMLTextAreaElement,value:string)=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));};
+const comment=()=>document.querySelector<HTMLTextAreaElement>('.pdf-annotation textarea')!;
+const report=(value:object)=>console.log(JSON.stringify(value));
+if(location.search.includes('run'))void(async()=>{try{
+ await wait(()=>document.querySelector('.textLayer span'),'reader');document.querySelector<HTMLButtonElement>('[aria-label="PDF 批注"]')!.click();await wait(comment,'annotation');
+ failure='Fixture disk full';input(comment(),'Retained after failed navigation');await wait(()=>document.querySelector('.pdf-save-error'),'failure');
+ handle!.beginMutation();let rejected=false;try{await handle!.flush();}catch{rejected=true;}finally{handle!.endMutation();}if(!rejected)throw Error('Navigation did not reject');
+ failure='';click('重新保存');await wait(()=>!document.querySelector('.pdf-save-error'),'retry');
+ document.querySelector<HTMLButtonElement>('[aria-label="批注加入 Markdown 备注"]')!.click();await wait(()=>stored.content.includes('?page=1&annotation='),'excerpt autosaved after retry');
+ click('编辑备注');await wait(()=>document.querySelector('[aria-label="PDF 备注源码"]'),'notes');input(document.querySelector('[aria-label="PDF 备注源码"]')!,'Autosave recovered without Cmd+S');await wait(()=>stored.content==='Autosave recovered without Cmd+S','notes autosave');
+ click('阅读');await wait(()=>document.querySelector('.textLayer span'),'reader remount');document.querySelector<HTMLButtonElement>('[aria-label="PDF 批注"]')!.click();await wait(comment,'comment remount');
+ for(const reason of ['CAS conflict','capacity rejected']){
+  failure=reason;input(comment(),`Unsaved ${reason}`);await wait(()=>document.querySelector('.pdf-save-error'),'recovery failure');
+  click('重新载入保存版本');await wait(()=>document.querySelector('[role="alertdialog"]'),'confirmation');click('取消，保留输入');await wait(()=>!document.querySelector('[role="alertdialog"]'),'cancel');if(comment().value!==`Unsaved ${reason}`)throw Error('Cancel lost input');
+  readFailure=true;click('重新载入保存版本');await wait(()=>document.querySelector('[role="alertdialog"]'),'confirmation again');click('放弃修改并重新载入');await wait(()=>document.querySelector('.pdf-save-error')?.textContent?.includes('read failed'),'reload failed');if(comment().value!==`Unsaved ${reason}`)throw Error('Read failure lost input');
+  await wait(()=>Array.from(document.querySelectorAll<HTMLButtonElement>('button')).some(b=>b.textContent==='放弃修改并重新载入'&&!b.disabled),'recovery ready');readFailure=false;failure='';stored={...stored,pdfReader:{...stored.pdfReader!,revision:stored.pdfReader!.revision+1,annotations:stored.pdfReader!.annotations.map(a=>({...a,comment:`Latest ${reason}`}))}};
+  click('放弃修改并重新载入');await wait(()=>!document.querySelector('.pdf-save-error'),'reload success');if(comment().value!==`Latest ${reason}`)throw Error('Not restored latest');
+  await handle!.flush();input(comment(),`Recovered ${reason}`);await wait(()=>stored.pdfReader?.annotations[0].comment===`Recovered ${reason}`,'post reload save');
+ }
+ failure='CAS conflict';input(comment(),'Retained on bounds failure');await wait(()=>document.querySelector('.pdf-save-error'),'bounds failure');click('重新载入保存版本');await wait(()=>document.querySelector('[role="alertdialog"]'),'bounds confirm');invalidBounds=true;click('放弃修改并重新载入');await wait(()=>document.querySelector('.pdf-save-error')?.textContent?.includes('页码超出'),'bounds rejection');if(comment().value!=='Retained on bounds failure')throw Error('Bounds failure lost input');
+ invalidBounds=false;failure='';readDelay=500;await wait(()=>Array.from(document.querySelectorAll<HTMLButtonElement>('button')).some(b=>b.textContent==='放弃修改并重新载入'&&!b.disabled),'delayed recovery ready');click('放弃修改并重新载入');handle!.beginMutation();await handle!.flush();
+ input(comment(),'Blocked by parent freeze');await new Promise(r=>setTimeout(r,600));if(stored.pdfReader!.annotations[0].comment==='Blocked by parent freeze')throw Error('Recovery released parent freeze');handle!.endMutation();readDelay=0;input(comment(),'Saved after parent unlock');await wait(()=>stored.pdfReader!.annotations[0].comment==='Saved after parent unlock','parent unlock');
+ // Link insertion must flush a fresh comment before mode unmount.
+ input(comment(),'Immediate link comment');const links=document.querySelector<HTMLSelectElement>('[aria-label="插入文档链接"]')!;links.value='11111111-1111-4111-8111-111111111111';links.dispatchEvent(new Event('change',{bubbles:true}));await wait(()=>document.querySelector('[aria-label="PDF 备注源码"]'),'link switches after flush');if(stored.pdfReader!.annotations[0].comment!=='Immediate link comment')throw Error('Link lost pending comment');await wait(()=>stored.content.includes('Link target'),'link body autosaved');
+ click('阅读');await wait(()=>document.querySelector('.textLayer span'),'reader after link');document.querySelector<HTMLButtonElement>('[aria-label="PDF 批注"]')!.click();await wait(comment,'comment after link');failure='Fixture disk full';input(comment(),'Failed link comment');await wait(()=>document.querySelector('.pdf-save-error'),'failed comment before link');const beforeBody=stored.content;const failedLinks=document.querySelector<HTMLSelectElement>('[aria-label="插入文档链接"]')!;failedLinks.value='11111111-1111-4111-8111-111111111111';failedLinks.dispatchEvent(new Event('change',{bubbles:true}));await new Promise(r=>setTimeout(r,600));if(!document.querySelector('.pdf-reader')||comment().value!=='Failed link comment'||stored.content!==beforeBody)throw Error('Link bypassed failed reader');failure='';click('重新保存');await wait(()=>!document.querySelector('.pdf-save-error'),'link retry');
+ report({stage:'editor-complete',checks:'reader failure navigation retry excerpt notes autosave conflict capacity cancel reload failure reload latest bounds delayed recovery parent freeze insert link pending failed',revision:stored.revision});
+}catch(error){report({stage:'editor-error',message:String(error),stack:error instanceof Error?error.stack:''});}})();
