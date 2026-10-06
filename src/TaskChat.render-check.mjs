@@ -27,6 +27,12 @@ try {
   assert(failed.includes('already has an active writer'));
   assert(failed.includes('使用上次补充内容'));
   assert(render({task:{...task,supplements:[{...task.supplements[0],sourceThreadId:'source'}]}}).includes('已复制历史到续接分支'));
+  const transcript=[{runId:'run',threadId:'thread',itemId:'progress',kind:'assistant',title:'',status:'completed',text:'Checking sources',finalAnswer:false,truncated:false,exitCode:null,at:1},{runId:'run',threadId:'thread',itemId:'command',kind:'tool',title:'执行命令',status:'completed',text:'',finalAnswer:false,truncated:false,exitCode:0,at:1.5},{runId:'run',threadId:'thread',itemId:'final',kind:'assistant',title:'',status:'completed',text:'# First version',finalAnswer:true,truncated:false,exitCode:null,at:2}];
+  const native=render({task:{...task,conversation:transcript,artifacts:[{...artifact,id:'run-result'}]}});
+  assert(native.includes('Checking sources')&&native.includes('执行命令')&&native.includes('退出码 0'));
+  assert.equal((native.match(/First version/g)||[]).length,1);
+  assert(render({task:{...task,conversation:transcript,conversationTruncated:true}}).includes('部分消息未收录'));
+  assert(render({task:{...task,status:'running'},onStop:()=>{}}).includes('停止生成'));
   const {MessageBody}=await server.ssrLoadModule('/src/MessageBody.tsx');
   const message=text=>renderToStaticMarkup(React.createElement(MessageBody,{content:text,markdown:true}));
   assert(!message('a'.repeat(1200)).includes('展开全部'));

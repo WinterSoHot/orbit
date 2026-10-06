@@ -152,6 +152,10 @@ pub struct Task {
     #[serde(default)]
     pub queue: Option<QueueRequest>,
     #[serde(default)]
+    pub conversation: Vec<crate::conversation::ChatItem>,
+    #[serde(default)]
+    pub conversation_truncated: bool,
+    #[serde(default)]
     pub acceptance: Option<Acceptance>,
     pub id: String,
     pub title: String,
@@ -194,6 +198,7 @@ impl Task {
     pub fn new(title: String, prompt: String, scene: String) -> Self {
         Self {
             queue: None, acceptance: None,
+            conversation: vec![], conversation_truncated: false,
             id: uuid::Uuid::new_v4().to_string(),
             title,
             prompt,
@@ -235,7 +240,10 @@ impl Task {
         self.agent_activity_ids.clear();
         self.approvals.clear();
         self.tokens = None;
+        self.settle_conversation();
         if !preserve {
+            self.conversation.clear();
+            self.conversation_truncated = false;
             self.thread_id = None;
             self.session_ref = None;
             self.artifacts.clear();
@@ -263,11 +271,10 @@ impl Task {
         }
         if self.archived
             || !self.terminal()
-            || self.artifacts.is_empty()
             || !self.can_resume()
             || self.run_id.is_none()
         {
-            return Err("仅未归档且已结束的交付任务可以继续；未知状态需先核对".into());
+            return Err("仅未归档且已结束、具有可恢复会话的任务可以继续；未知状态需先核对".into());
         }
         if text.trim().is_empty() || text.chars().count() > 2000 {
             return Err("补充信息应为 1–2000 字".into());
@@ -339,6 +346,7 @@ impl Task {
         }
     }
     pub fn unconfirm_directions(&mut self) {
+        self.settle_conversation();
         for direction in &mut self.directions {
             if direction.status == "pending" {
                 direction.status = "unknown".into();

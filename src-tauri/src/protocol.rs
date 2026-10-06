@@ -342,6 +342,7 @@ pub fn project(task: &mut Task, message: &Value) -> bool {
         return false;
     }
     task.root_node();
+    let conversation_changed = crate::conversation::project(task, method, p);
     match method {
         "turn/started" if thread == root => {
             let id = text(&p["turn"], "id");
@@ -500,7 +501,7 @@ pub fn project(task: &mut Task, message: &Value) -> bool {
                         "Codex",
                     );
                 }
-                _ => return false,
+                _ => return conversation_changed,
             }
         }
         "thread/tokenUsage/updated" if thread == root => {

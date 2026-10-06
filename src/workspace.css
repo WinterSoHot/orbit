@@ -181,3 +181,27 @@
   .task-context {flex:none;max-height:none;overflow:visible;}
   .context-body {flex:none;max-height:none;overflow:visible;}
 }
+
+/* Conversation reads as a transcript; only documents and decisions use cards. */
+.task-chat {position:relative;}
+.chat-message.assistant {padding:0;border:0;background:transparent;max-width:78ch;}
+.conversation-pane .chat-message.assistant {padding:0;}
+.chat-message.assistant .markdown-body {padding:4px 0;overflow:visible;max-height:none;min-height:0;font-size:14px;line-height:1.8;}
+.chat-tool {color:var(--orbit-muted);border-left:2px solid var(--orbit-border);padding:4px 0 4px 12px;}
+.chat-tool summary {display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;list-style:none;}
+.chat-tool summary::-webkit-details-marker {display:none;}
+.chat-tool summary:after {content:'›';margin-left:auto;transform:rotate(90deg);}
+.chat-tool[open] summary:after {transform:rotate(-90deg);}
+.chat-tool summary small {font-size:10px;}
+.chat-tool>div {display:flex;gap:8px;padding:12px 0 4px;font-size:12px;}
+.chat-tool small {display:block;margin-top:2px;}
+.chat-truncated {color:var(--orbit-muted);font-size:11px;}
+.chat-document {display:flex;align-items:center;gap:12px;}
+.chat-document>span {flex:1;min-width:0;}
+.chat-document small {display:block;color:var(--orbit-muted);font-size:11px;overflow-wrap:anywhere;}
+.chat-document .chat-document-link {margin:0;}
+.chat-latest {align-self:center;flex-shrink:0;margin:6px;display:flex;align-items:center;gap:6px;border:1px solid var(--orbit-border);border-radius:20px;background:var(--orbit-surface);box-shadow:0 3px 12px #0002;color:var(--orbit-text);padding:7px 12px;font-size:11px;white-space:nowrap;}
+.chat-send-actions {display:flex;align-items:center;gap:8px;}
+.chat-stop {display:flex;align-items:center;gap:6px;border:1px solid var(--orbit-border);border-radius:8px;background:var(--orbit-surface);color:var(--orbit-text);padding:7px 10px;font-size:11px;}
+.chat-tool summary:focus-visible {outline:2px solid var(--orbit-blue);outline-offset:4px;}
+@media(prefers-reduced-motion:reduce){.chat-tool .spin {animation:none;}}

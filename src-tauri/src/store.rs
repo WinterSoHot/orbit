@@ -552,6 +552,10 @@ fn validate(task: &Task) -> Result<(), String> {
     if task.archived && (task.status != "completed" || task.artifacts.is_empty()) {
         return Err("归档记录缺少已完成的交付".into());
     }
+    let mut conversation_ids = std::collections::HashSet::new();
+    if task.conversation.iter().any(|x| !conversation_ids.insert((&x.run_id, &x.thread_id, &x.item_id))) {
+        return Err("对话记录包含重复消息标识".into());
+    }
     if task.agent_activity_ids.len() > crate::protocol::MAX_AGENT_ACTIVITIES
         || task.agent_activity_ids.iter().any(|id| id.len() > 400)
     {
@@ -574,6 +578,9 @@ fn validate(task: &Task) -> Result<(), String> {
         || task.id.len() > 100
         || task.title.len() > 500
         || task.prompt.len() > 48000
+        || task.conversation.len() > crate::conversation::ITEM_LIMIT
+        || task.conversation.iter().map(|x| x.text.chars().count()).sum::<usize>() > crate::conversation::TEXT_LIMIT
+        || task.conversation.iter().any(|x| x.run_id.is_empty() || x.run_id.len() > 100 || x.thread_id.is_empty() || x.thread_id.len() > 128 || x.item_id.is_empty() || x.item_id.len() > 128 || x.title.len() > 100 || x.text.chars().count() > crate::conversation::ITEM_TEXT_LIMIT || !matches!(x.kind.as_str(), "assistant" | "tool") || !matches!(x.status.as_str(), "running" | "completed" | "failed" | "unknown"))
         || task.nodes.len() > 64
         || task.events.len() > 100
         || task.artifacts.len() > 10
@@ -741,6 +748,24 @@ mod tests {
         let exported = PathBuf::from(store.export_artifact("doc").unwrap());
         assert_eq!(exported.parent().unwrap(), chosen.canonicalize().unwrap());
         assert_eq!(fs::read_to_string(exported).unwrap(), "# Original");
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn conversation_survives_storage_and_recovery_without_losing_completed_messages() {
+        let directory = directory();
+        let store = Store::open(directory.clone()).unwrap();
+        let mut task = Task::new("Chat".into(), "Goal".into(), "research".into());
+        task.thread_id = Some("root".into()); task.turn_id = Some("turn".into());
+        crate::protocol::project(&mut task, &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn","item":{"type":"agentMessage","id":"answer","text":"public reply"}}}));
+        crate::protocol::project(&mut task, &serde_json::json!({"method":"item/agentMessage/delta","params":{"threadId":"root","turnId":"turn","itemId":"progress","delta":"working"}}));
+        store.save_task(task.clone()).unwrap();
+        let reopened = Store::open(directory.clone()).unwrap().task(&task.id).unwrap();
+        assert_eq!(reopened.status, "unknown");
+        assert_eq!(reopened.conversation[0].status, "completed");
+        assert_eq!(reopened.conversation[0].text, "public reply");
+        assert_eq!(reopened.conversation[1].status, "unknown");
+        let mut duplicate = reopened.clone(); duplicate.conversation.push(duplicate.conversation[0].clone());
+        assert!(validate(&duplicate).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

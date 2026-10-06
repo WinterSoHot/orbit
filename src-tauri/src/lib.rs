@@ -1,5 +1,6 @@
 mod executor;
 mod model;
+mod conversation;
 #[cfg(feature = "desktop")]
 mod knowledge;
 #[cfg(feature = "desktop")]

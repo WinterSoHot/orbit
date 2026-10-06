@@ -4,6 +4,7 @@ export type Provider = string;
 export interface Capabilities { resume:boolean; steer:boolean; interrupt:boolean; input?:boolean; agentHistory:boolean }
 export interface SessionRef { provider:string; protocol:string; id:string; cwd?:string|null; metadata?:unknown; [key:string]:unknown }
 export interface AgentNode { id: string; name: string; role: string; model: string; status: Status; summary: string; output: string; parentId: string | null; agentPath?: string | null; detailNotice?: string | null; detailTurnCount?: number; outputTruncated?: boolean }
+export interface ChatItem {runId:string;threadId:string;itemId:string;kind:'assistant'|'tool';title:string;status:'running'|'completed'|'failed'|'unknown';text:string;finalAnswer:boolean;truncated:boolean;exitCode:number|null;at:number}
 export interface Activity { id: string; at: number; kind: string; agent: string; text: string }
 export interface InputQuestion {id:string;header?:string;question:string;options?:{label:string;description:string}[]|null;isOther?:boolean;isSecret?:boolean}
 export interface Approval { id: string; requestId: string; runId: string; turnId: string; title: string; description: string; kind: string; questionIds: string[]; questions?:InputQuestion[];questionError?:string|null }
@@ -13,7 +14,7 @@ export interface Direction { id:string; runId:string; turnId:string; text:string
 export type QueueAction = {kind:"start"} | {kind:"continue";text:string;runId:string|null;turnId:string|null};
 export interface QueueRequest {requestId:string;order:number;nextRunId:string;state:"pending"|"claimed";action:QueueAction;error:string|null}
 export interface Acceptance {runId:string|null;turnId:string|null;artifactIds:string[]}
-export interface Task { queue?:QueueRequest|null; acceptance?:Acceptance|null; sessionRef?:SessionRef|null; capabilities?:Capabilities|null; directions?:Direction[]; supplements?:Supplement[]; supersededRunId?:string|null; id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
+export interface Task { conversation?:ChatItem[]; conversationTruncated?:boolean; queue?:QueueRequest|null; acceptance?:Acceptance|null; sessionRef?:SessionRef|null; capabilities?:Capabilities|null; directions?:Direction[]; supplements?:Supplement[]; supersededRunId?:string|null; id: string; title: string; prompt: string; scene: Scene; provider: Provider; status: Status; archived?: boolean; createdAt: number; startedAt: number | null; finishedAt: number | null; runId: string | null; threadId: string | null; turnId: string | null; revision: number; agentActivityIds?: string[]; phase: number; nodes: AgentNode[]; events: Activity[]; approvals: Approval[]; artifacts: Artifact[]; tokens: number | null }
 export const statusLabels: Record<Status, string> = { queued: '待启动', running: '运行中', approval: '等待你', cancelling: '中断请求中', interrupted: '已中断', completed: '执行结束', failed: '失败', unknown: '需核对' };
 export const isActive = (status: Status) => ['running', 'approval', 'cancelling'].includes(status);
 export const isTerminal = (status: Status) => ['completed', 'failed', 'interrupted'].includes(status);
@@ -39,7 +40,7 @@ export function boardColumn(task:Task):BoardColumn {
 
 
 export function canContinue(task:Task):boolean {
-  return !task.archived && !task.queue && isTerminal(task.status) && task.artifacts.length>0 && canResume(task) && !!task.runId && !!(task.turnId || task.supplements?.at(-1)?.previousTurnId) && task.artifacts.length<10 && (task.supplements?.length||0)<10;
+  return !task.archived && !task.queue && isTerminal(task.status) && canResume(task) && !!task.runId && !!(task.turnId || task.supplements?.at(-1)?.previousTurnId) && task.artifacts.length<10 && (task.supplements?.length||0)<10;
 }
 
 export function taskCapabilities(task:Task):Capabilities {
