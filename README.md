@@ -75,13 +75,13 @@ GitHub Actions 配置见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 CI 使用 Node 24、Rust 1.98.0 与 `macos-15-intel`；应用最低系统版本仍为 macOS 13。ZIP 保留 App 的权限与元数据，采用 ad-hoc 签名，没有开发者签名或公证。
 
-自动发布配置见 [.github/workflows/release.yml](.github/workflows/release.yml)。推送 `vX.Y.Z` 标签后，校验标签与 `package.json`、`package-lock.json`、Tauri 配置及 Cargo 项目版本一致，执行测试并构建正式版 App ZIP 和 DMG。成功后自动创建 [GitHub Release](https://github.com/WinterSoHot/orbit/releases)，附上两个安装包、SHA-256 校验文件及自动生成的变更说明。发布权限仅授予测试通过后的发布任务。安装包面向 macOS Intel，仍采用 ad-hoc 签名，未做开发者签名或公证。
+自动发布配置见 [.github/workflows/release.yml](.github/workflows/release.yml)。推送 `vX.Y.Z` 标签后，校验标签与 `package.json`、`package-lock.json`、Tauri 配置及 Cargo 项目版本一致，执行测试并构建正式版 App ZIP 和 DMG。成功后自动创建 [GitHub Release](https://github.com/WinterSoHot/orbit/releases)，附上两种架构共四个安装包、SHA-256 校验文件及自动生成的变更说明。发布权限仅授予测试通过后的发布任务。发布工作流使用 `macos-15-intel` 和 `macos-15` 原生构建，分别提供 Intel `x64` 与 Apple Silicon `arm64` 的 App ZIP、DMG 和独立校验文件；两个架构的构建与测试均通过后才发布。安装包仍采用 ad-hoc 签名，未做开发者签名或公证。
 
 发布前同步上述版本文件并提交到 `main`，然后推送对应标签，例如当前版本：
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 也可在 Actions 的 Release 工作流中选择已有版本标签手动运行；选择分支或版本不一致时会拒绝发布。已存在的 Release 不会覆盖，后续交付请使用新版本标签。

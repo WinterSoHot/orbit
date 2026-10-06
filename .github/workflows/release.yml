@@ -14,8 +14,18 @@ concurrency:
 
 jobs:
   build:
-    name: macOS Intel release build
-    runs-on: macos-15-intel
+    name: macOS ${{ matrix.arch }} release build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+            mach: x86_64
+          - runner: macos-15
+            arch: arm64
+            mach: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     outputs:
       sha: ${{ steps.source.outputs.sha }}
@@ -25,13 +35,19 @@ jobs:
       APPLE_SIGNING_IDENTITY: '-'
       RELEASE_TAG: ${{ github.ref_name }}
       REF_TYPE: ${{ github.ref_type }}
+      APP_ARCH: ${{ matrix.arch }}
+      MACH_ARCH: ${{ matrix.mach }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Record built commit
         id: source
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          built_sha=$(git rev-parse HEAD)
+          test "$built_sha" = "$GITHUB_SHA"
+          test "$(uname -m)" = "$MACH_ARCH"
+          echo "sha=$built_sha" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -68,16 +84,17 @@ jobs:
         run: |
           mkdir release
           test -d src-tauri/target/release/bundle/macos/Orbit.app
-          ditto -c -k --sequesterRsrc --keepParent src-tauri/target/release/bundle/macos/Orbit.app "release/Orbit-${RELEASE_TAG}-macos-x64.zip"
+          test "$(lipo -archs src-tauri/target/release/bundle/macos/Orbit.app/Contents/MacOS/orbit-agent-workbench)" = "$MACH_ARCH"
+          ditto -c -k --sequesterRsrc --keepParent src-tauri/target/release/bundle/macos/Orbit.app "release/Orbit-${RELEASE_TAG}-macos-${APP_ARCH}.zip"
           dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
           test "${#dmg[@]}" -eq 1
           test -s "${dmg[0]}"
-          cp "${dmg[0]}" "release/Orbit-${RELEASE_TAG}-macos-x64.dmg"
+          cp "${dmg[0]}" "release/Orbit-${RELEASE_TAG}-macos-${APP_ARCH}.dmg"
           cd release
-          shasum -a 256 *.zip *.dmg > SHA256SUMS.txt
+          shasum -a 256 *.zip *.dmg > "SHA256SUMS-macos-${APP_ARCH}.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Orbit-release-macos-x64
+          name: Orbit-release-macos-${{ matrix.arch }}
           path: release/*
           if-no-files-found: error
           retention-days: 7
@@ -97,19 +114,22 @@ jobs:
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: Orbit-release-macos-x64
+          pattern: Orbit-release-macos-*
+          merge-multiple: true
           path: release
       - name: Publish verified assets
         run: |
           cd release
-          sha256sum --check SHA256SUMS.txt
-          test -s "Orbit-${RELEASE_TAG}-macos-x64.zip"
-          test -s "Orbit-${RELEASE_TAG}-macos-x64.dmg"
+          for arch in x64 arm64; do
+            sha256sum --check "SHA256SUMS-macos-${arch}.txt"
+            test -s "Orbit-${RELEASE_TAG}-macos-${arch}.zip"
+            test -s "Orbit-${RELEASE_TAG}-macos-${arch}.dmg"
+          done
           read -r kind sha < <(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
           while [ "$kind" = tag ]; do
             read -r kind sha < <(gh api "repos/$GH_REPO/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
           done
           test "$kind" = commit
           test "$sha" = "$EXPECTED_SHA"
-          printf '%s\n' 'macOS Intel (x64), macOS 13 or later. Ad-hoc signed; not Developer ID signed or notarized.' > /tmp/release-notes.txt
-          gh release create "$RELEASE_TAG" "Orbit-${RELEASE_TAG}-macos-x64.zip" "Orbit-${RELEASE_TAG}-macos-x64.dmg" SHA256SUMS.txt --verify-tag --title "Orbit ${RELEASE_TAG}" --generate-notes --notes-file /tmp/release-notes.txt
+          printf '%s\n' 'macOS Intel (x64) and Apple Silicon (arm64), macOS 13 or later. Ad-hoc signed; not Developer ID signed or notarized.' > /tmp/release-notes.txt
+          gh release create "$RELEASE_TAG" *.zip *.dmg SHA256SUMS-macos-*.txt --verify-tag --title "Orbit ${RELEASE_TAG}" --generate-notes --notes-file /tmp/release-notes.txt
