@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: macOS Intel release build
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      RUSTUP_TOOLCHAIN: '1.98.0'
+      APPLE_SIGNING_IDENTITY: '-'
+      RELEASE_TAG: ${{ github.ref_name }}
+      REF_TYPE: ${{ github.ref_type }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record built commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Check release version
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const json = path => JSON.parse(readFileSync(path, 'utf8'));
+          const version = json('package.json').version;
+          assert.equal(process.env.REF_TYPE, 'tag', 'Select a version tag to publish');
+          assert.match(process.env.RELEASE_TAG, /^v\d+\.\d+\.\d+$/, 'Use a stable vX.Y.Z tag');
+          assert.equal(process.env.RELEASE_TAG, `v${version}`, 'Tag must match application version');
+          assert.equal(json('src-tauri/tauri.conf.json').version, version);
+          assert.equal(json('package-lock.json').version, version);
+          assert.equal(json('package-lock.json').packages[''].version, version);
+          const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const packageSection = cargo.split('[package]')[1]?.split(/\n\[/)[0];
+          assert.equal(packageSection?.match(/^version\s*=\s*"([^"]+)"/m)?.[1], version);
+          console.log(`Validated ${process.env.RELEASE_TAG}`);
+          NODE
+      - name: Set up Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Test frontend
+        run: npm test
+      - name: Build release App and DMG
+        run: npm run tauri -- build --ci --bundles app,dmg -- --locked
+      - name: Test Rust
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Package and checksum
+        run: |
+          mkdir release
+          test -d src-tauri/target/release/bundle/macos/Orbit.app
+          ditto -c -k --sequesterRsrc --keepParent src-tauri/target/release/bundle/macos/Orbit.app "release/Orbit-${RELEASE_TAG}-macos-x64.zip"
+          dmg=(src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#dmg[@]}" -eq 1
+          test -s "${dmg[0]}"
+          cp "${dmg[0]}" "release/Orbit-${RELEASE_TAG}-macos-x64.dmg"
+          cd release
+          shasum -a 256 *.zip *.dmg > SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Orbit-release-macos-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      EXPECTED_SHA: ${{ needs.build.outputs.sha }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: Orbit-release-macos-x64
+          path: release
+      - name: Publish verified assets
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          test -s "Orbit-${RELEASE_TAG}-macos-x64.zip"
+          test -s "Orbit-${RELEASE_TAG}-macos-x64.dmg"
+          read -r kind sha < <(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
+          while [ "$kind" = tag ]; do
+            read -r kind sha < <(gh api "repos/$GH_REPO/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
+          done
+          test "$kind" = commit
+          test "$sha" = "$EXPECTED_SHA"
+          printf '%s\n' 'macOS Intel (x64), macOS 13 or later. Ad-hoc signed; not Developer ID signed or notarized.' > /tmp/release-notes.txt
+          gh release create "$RELEASE_TAG" "Orbit-${RELEASE_TAG}-macos-x64.zip" "Orbit-${RELEASE_TAG}-macos-x64.dmg" SHA256SUMS.txt --verify-tag --title "Orbit ${RELEASE_TAG}" --generate-notes --notes-file /tmp/release-notes.txt
