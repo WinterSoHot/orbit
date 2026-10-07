@@ -43,3 +43,9 @@ test('new continuation stays after old conversation even before any new item or 
   const finished=chatTimeline({...task,conversation,supplements:[supplement],artifacts:[previous,{id:'next-result',name:'b.md',kind:'markdown',content:'B',createdAt:0}],conversationTruncated:true});
   assert.deepEqual(finished.map(x=>x.item?.itemId||x.artifact?.id||x.text),['first','run-result','Follow up','next-result']);
 });
+
+test('explicit receipts order typed and manual artifacts under their original run',()=>{
+  const receipt={id:'submission',runId:'run',turnId:'turn',threadId:'thread',itemId:'reply',origin:'executor' as const,artifactIds:['doc']};
+  const entries=chatTimeline({...task,explicitDelivery:true,conversation:[item('reply','protocol',2)],deliverySubmissions:[receipt],artifacts:[{id:'doc',name:'Website',kind:'link',content:'https://example.com',createdAt:1}]});
+  assert.equal(entries[0].item?.itemId,'reply');assert.equal(entries[1].artifact?.id,'doc');assert.equal(entries[1].documentOnly,true);
+});

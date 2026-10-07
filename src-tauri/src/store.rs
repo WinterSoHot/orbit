@@ -12,6 +12,7 @@ const MAX_STORE: u64 = 8 * 1024 * 1024;
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Workspace {
     pub tasks: Vec<Task>,
+    #[serde(default="crate::team::default_profiles")] pub agents:Vec<crate::team::AgentProfile>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default, rename = "exportDirectory")]
@@ -21,6 +22,7 @@ pub struct Workspace {
 struct Disk {
     version: u32,
     tasks: Vec<Task>,
+    #[serde(default="crate::team::default_profiles")] agents:Vec<crate::team::AgentProfile>,
     #[serde(default, rename = "exportDirectory")]
     export_directory: Option<PathBuf>,
 }
@@ -38,10 +40,11 @@ struct WorkspaceExport {
     #[serde(flatten)]
     workspace: Workspace,
     library: LibraryExport,
+    code_bundles:Vec<crate::coding::BundleExport>,
 }
 pub struct Store {
     pub directory: PathBuf,
-    data: Mutex<Workspace>,
+    pub(crate) data: Mutex<Workspace>,
     pub library: LibraryStore,
 }
 
@@ -61,20 +64,24 @@ impl Store {
                     return Err("记录超过大小限制".into());
                 }
                 let disk: Disk = serde_json::from_slice(&bytes).map_err(|_| "记录格式损坏")?;
-                if !matches!(disk.version, 1 | 2) || disk.tasks.len() > 50 {
+                if !matches!(disk.version, 1 | 2 | 3 | 4 | 5) || disk.tasks.len() > 50 {
                     return Err("记录版本或任务数量不受支持".into());
                 }
+                if disk.agents.len()>12{return Err("Agent 数量超限".into())}
+                let mut agent_ids=std::collections::HashSet::new();for a in &disk.agents{a.validate()?;if !agent_ids.insert(&a.id){return Err("Agent 标识重复".into())}}
                 let mut tasks: Vec<_> = disk
                     .tasks
                     .into_iter()
                     .filter(|t| t.provider != "demo")
                     .collect();
+                crate::team::validate_links(&tasks)?;
                 for task in &mut tasks {
                     validate(task)?;
                     task.recover();
                 }
                 Ok(Workspace {
                     tasks,
+                    agents:disk.agents,
                     error: None,
                     export_directory: disk.export_directory,
                 })
@@ -83,12 +90,13 @@ impl Store {
                 Ok(workspace) => workspace,
                 Err(reason) => Workspace {
                     tasks: vec![],
+                    agents:crate::team::default_profiles(),
                     export_directory: None,
                     error: Some(format!("{}，原文件已保留。当前操作暂存内存。", reason)),
                 },
             }
         } else {
-            Workspace::default()
+            Workspace{agents:crate::team::default_profiles(),..Default::default()}
         };
         let library = LibraryStore::open(directory.clone())?;
         Ok(Self {
@@ -114,6 +122,7 @@ impl Store {
         let mut data = self.data.lock().unwrap();
         let mut candidate = data.clone();
         if let Some(old) = candidate.tasks.iter_mut().find(|t| t.id == task.id) {
+            if old.source_inputs.iter().any(|i| !task.source_inputs.iter().any(|n|i.same_content(n))){return Err("资料快照不可改写".into())}
             if old.provider != task.provider || old.requested_model != task.requested_model {
                 return Err("任务执行器与模型不可变，请新建任务调整选择".into());
             }
@@ -123,7 +132,7 @@ impl Store {
             task.executor_revision = if old.run_id == task.run_id { old.executor_revision } else { Some(task.revision) };
             *old = task;
         } else {
-            task.executor_revision=Some(task.revision);
+        task.executor_revision=Some(task.revision);
             if candidate.tasks.len() >= 50 {
                 return Err("已达到 50 个任务，请先删除不需要的归档任务".into());
             }
@@ -155,10 +164,13 @@ impl Store {
         *data = candidate;
         Ok((next, anchor))
     }
-    pub fn enqueue(&self, id: &str, revision: u64, action: QueueAction) -> Result<Task,String> {
+    pub fn enqueue(&self, id: &str, revision: u64, action: QueueAction) -> Result<Task,String> {self.enqueue_with_sources(id,revision,action,vec![])}
+    pub fn enqueue_with_sources(&self, id:&str, revision:u64, action:QueueAction, sources:Vec<crate::sources::SourceSnapshot>)->Result<Task,String>{
+        crate::sources::validate_sources(&sources)?;
         let mut data = self.data.lock().unwrap();
         let index = data.tasks.iter().position(|t| t.id == id).ok_or("任务不存在")?;
         let t = &data.tasks[index];
+        crate::team_store::can_enqueue(&data,t)?;
         if t.revision != revision || t.archived || t.queue.is_some() || matches!(t.status.as_str(), "running"|"approval"|"cancelling") {
             return Err("任务已更新、正在执行或已在队列中，请重新核对".into());
         }
@@ -166,22 +178,34 @@ impl Store {
         let order = data.tasks.iter().filter_map(|t|t.queue.as_ref().map(|q|q.order)).max().unwrap_or(0).checked_add(1).filter(|n|*n<=9_007_199_254_740_991).ok_or("队列序号超过限制")?;
         let mut candidate = data.clone();
         let t=&mut candidate.tasks[index];
-        t.queue=Some(QueueRequest {request_id:uuid::Uuid::new_v4().to_string(),order,next_run_id:uuid::Uuid::new_v4().to_string(),state:"pending".into(),action,error:None});
+        t.queue=Some(QueueRequest {cancel_requested:false,request_id:uuid::Uuid::new_v4().to_string(),order,next_run_id:uuid::Uuid::new_v4().to_string(),state:"pending".into(),action,error:None});
+        if !sources.is_empty() {
+            let q=t.queue.as_ref().unwrap();
+            let QueueAction::Continue{text,..}=&q.action else {return Err("新资料请在补充对话中发送".into())};
+            t.source_inputs.push(crate::sources::SourceInput::new(q.next_run_id.clone(),"continue",text.clone(),sources,Some(q.next_run_id.clone()),None));
+        }
         t.event("请求已加入等待队列", "system", "工作台");
         validate(t)?;
         let saved=t.clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
     }
-    pub fn claim_next(&self) -> Result<Option<(Task, Option<String>)>,String> {
+    pub fn claim_next(&self) -> Result<Option<(Task, Option<String>)>,String> {self.claim_next_reserved(&[])}
+    pub fn claim_next_reserved(&self,live_requests:&[String]) -> Result<Option<(Task, Option<String>)>,String> {
         let mut data=self.data.lock().unwrap();
-        if data.tasks.iter().any(|t|t.queue.as_ref().is_some_and(|q|q.state=="claimed")) {return Err("存在未确认的启动请求，请先核对并撤销该请求".into());}
-        let Some(index)=data.tasks.iter().enumerate().filter(|(_,t)|t.queue.is_some()).min_by_key(|(_,t)|t.queue.as_ref().unwrap().order).map(|(i,_)|i) else {return Ok(None)};
+        if data.tasks.iter().any(|t|t.queue.as_ref().is_some_and(|q|q.state=="claimed"&&!live_requests.contains(&q.request_id))) {return Err("存在未确认的启动请求，请先核对并撤销该请求".into());}
+        let Some(index)=data.tasks.iter().enumerate().filter(|(_,t)|t.queue.as_ref().is_some_and(|q|q.state=="pending")).min_by_key(|(_,t)|t.queue.as_ref().unwrap().order).map(|(i,_)|i) else {return Ok(None)};
         let t=&data.tasks[index];let q=t.queue.as_ref().unwrap();
         if q.error.is_some() || t.archived || matches!(t.status.as_str(),"running"|"approval"|"cancelling") {return Err("队首任务需要核对，未启动".into());}
         let (mut next,anchor)=match &q.action {
-            QueueAction::Start=>{let mut next=t.clone();next.begin_run(false);(next,None)},
+            QueueAction::Start=>{let mut next=t.clone();next.begin_run(t.team.is_some()||t.parent_link.is_some());if t.team.is_some()||t.parent_link.is_some(){next.thread_id=None;next.session_ref=None;}(next,None)},
             QueueAction::Continue{text,run_id,turn_id}=>{let (next,anchor)=t.continued(t.revision,run_id,turn_id,text)?;(next,Some(anchor))}
         };
         next.run_id=Some(q.next_run_id.clone());
+        if matches!(q.action,QueueAction::Start) {
+            if !next.source_inputs.is_empty(){
+                let sources=next.source_inputs.iter().find(|i|i.kind=="template").map(|i|i.sources.clone()).unwrap_or_default();
+                next.source_inputs.push(crate::sources::SourceInput::new(q.next_run_id.clone(),"initial",next.prompt.clone(),sources,Some(q.next_run_id.clone()),None));
+            }
+        }
         next.executor_revision=Some(next.revision);
         if anchor.is_some() {if let Some(last)=next.supplements.last_mut(){last.run_id=q.next_run_id.clone();}}
         next.queue.as_mut().unwrap().state="claimed".into();
@@ -192,16 +216,24 @@ impl Store {
         let mut data=self.data.lock().unwrap();let index=data.tasks.iter().position(|t|t.id==id).ok_or("任务不存在")?;
         let t=&data.tasks[index];
         if !t.queue.as_ref().is_some_and(|q|q.request_id==request_id && q.next_run_id==run_id && q.state=="claimed") || t.run_id.as_deref()!=Some(run_id) {return Err("启动请求已失效").map_err(String::from);}
+        if t.queue.as_ref().is_some_and(|q|q.cancel_requested){return Err("启动取消意图尚未清理确认，不能完成启动交接".into())}
         let mut candidate=data.clone();let t=&mut candidate.tasks[index];
-        if let Some(error)=error {if matches!(t.status.as_str(),"running"|"approval"|"cancelling"){t.status="unknown".into();}t.queue.as_mut().unwrap().error=Some(error.chars().take(2000).collect());t.event("启动未确认，请求已保留，请核对后撤销", "error", "工作台");}
+        if let Some(error)=error {if matches!(t.status.as_str(),"running"|"approval"|"cancelling"){t.status="unknown".into();}for input in &mut t.source_inputs {if input.run_id.as_deref()==Some(run_id)&&input.status=="pending"{input.status="unknown".into();}}t.queue.as_mut().unwrap().error=Some(error.chars().take(2000).collect());t.event("启动未确认，请求已保留，请核对后撤销", "error", "工作台");}
         else {t.queue=None;t.event("任务已离开等待队列", "system", "工作台");}
         let saved=t.clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
     }
     pub fn cancel_queued(&self,id:&str,revision:u64) -> Result<Task,String> {
         let mut data=self.data.lock().unwrap();let index=data.tasks.iter().position(|t|t.id==id).ok_or("任务不存在")?;let t=&data.tasks[index];
-        if t.revision!=revision || t.queue.is_none() || matches!(t.status.as_str(),"running"|"approval"|"cancelling") {return Err("任务已更新或已经启动，不能撤销排队".into());}
-        let mut candidate=data.clone();candidate.tasks[index].queue=None;candidate.tasks[index].event("已撤销等待请求，历史保留", "system", "你");
+        if t.revision!=revision || !t.queue.as_ref().is_some_and(|q|q.state=="pending") || matches!(t.status.as_str(),"running"|"approval"|"cancelling") {return Err("任务已更新或已经启动，不能撤销排队".into());}
+        let mut candidate=data.clone();let next=&mut candidate.tasks[index];
+        let run=&next.queue.as_ref().unwrap().next_run_id;
+        for input in &mut next.source_inputs {if input.run_id.as_ref()==Some(run)&&input.status=="pending"{input.status="cancelled".into();}}
+        next.queue=None;next.event("已撤销等待请求，历史保留", "system", "你");
         let saved=candidate.tasks[index].clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
+    }
+    pub fn request_claim_cancel(&self,id:&str,revision:u64)->Result<Task,String>{
+        let mut data=self.data.lock().unwrap();let mut next=data.clone();let t=next.tasks.iter_mut().find(|t|t.id==id&&t.revision==revision).ok_or("任务已更新")?;
+        let q=t.queue.as_mut().filter(|q|q.state=="claimed").ok_or("启动请求不存在")?;q.cancel_requested=true;q.error=Some("正在取消启动，等待进程清理确认".into());t.event("启动取消意图已保存","system","你");let saved=t.clone();self.persist(&next)?;*data=next;Ok(saved)
     }
     // Caller must hold lifecycle admission and verify actual executor ownership is idle.
     pub fn cancel_claimed(&self,id:&str,revision:u64,request_id:&str,run_id:&str)->Result<Task,String> {
@@ -209,17 +241,20 @@ impl Store {
         if t.revision!=revision || t.run_id.as_deref()!=Some(run_id) || !t.queue.as_ref().is_some_and(|q|q.state=="claimed"&&q.request_id==request_id&&q.next_run_id==run_id){return Err("启动请求已更新，请重新核对".into());}
         let mut candidate=data.clone();let t=&mut candidate.tasks[index];
         if matches!(t.status.as_str(),"running"|"approval"|"cancelling"){t.status="unknown".into();}
+        for input in &mut t.source_inputs {if input.run_id.as_deref()==Some(run_id)&&input.status=="pending"{input.status="unknown".into();}}
         t.queue=None;t.event("执行器已空闲，已撤销未确认启动请求", "system", "你");
         let saved=t.clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
     }
     pub fn accept_task(&self,id:&str,revision:u64,run:&Option<String>,turn:&Option<String>) -> Result<Task,String> {
         let mut data=self.data.lock().unwrap();let index=data.tasks.iter().position(|t|t.id==id).ok_or("任务不存在")?;let t=&data.tasks[index];
-        if t.revision!=revision || &t.run_id!=run || &t.turn_id!=turn || t.archived || t.queue.is_some() || t.status!="completed" || t.artifacts.is_empty() {return Err("请核对最新已完成的交付后再验收".into());}
+        crate::team_store::can_accept(&data,t)?;
+        if t.revision!=revision || &t.run_id!=run || &t.turn_id!=turn || t.archived || t.queue.is_some() || t.status!="completed" || t.current_delivery_ids().is_empty() {return Err("请核对最新已完成的交付后再验收".into());}
         let mut candidate=data.clone();let t=&mut candidate.tasks[index];
-        t.acceptance=Some(Acceptance{run_id:t.run_id.clone(),turn_id:t.turn_id.clone(),artifact_ids:t.artifacts.iter().map(|a|a.id.clone()).collect()});
+        t.acceptance=Some(Acceptance{run_id:t.run_id.clone(),turn_id:t.turn_id.clone(),artifact_ids:t.current_delivery_ids()});
         t.event("最新交付已验收", "system", "你");let saved=t.clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
     }
     pub fn save_existing_task(&self, mut task: Task) -> Result<Option<Task>, String> {
+        let actor_revision=task.revision;
         let mut data = self.data.lock().unwrap();
         let Some(index) = data.tasks.iter().position(|t| t.id == task.id) else {
             return Ok(None);
@@ -234,16 +269,56 @@ impl Store {
         {
             return Ok(None);
         }
-        task.executor_revision=Some(task.revision);
+        let mut inputs=current.source_inputs.clone();
+        for input in &task.source_inputs {
+            if let Some(old)=inputs.iter_mut().find(|i|i.id==input.id){
+                if !old.same_content(input){return Err("资料快照不可改写".into())}
+                // Qoder confirms only from a matching remote prompt response/update, not its local request token.
+                if task.provider=="qoder" && input.status=="accepted" && input.run_id==task.run_id && input.turn_id==task.turn_id {old.status="accepted".into();old.turn_id=input.turn_id.clone();}
+            }
+            else {
+                if input.kind!="direction" || input.run_id!=current.run_id || input.turn_id!=current.turn_id || !task.directions.iter().any(|d|d.id==input.id && d.text==input.text && d.status=="pending"){return Err("新增资料与当前输入不匹配".into())}
+                inputs.push(input.clone());
+            }
+        }
+        task.source_inputs=inputs;
+        for input in &mut task.source_inputs {
+            if input.kind=="direction" {if let Some(d)=task.directions.iter().find(|d|d.id==input.id){input.status=d.status.clone();}}
+            else if input.run_id.is_some() && input.run_id==task.run_id {
+                if task.provider=="codex" && task.turn_id.is_some(){input.turn_id=task.turn_id.clone();input.status="accepted".into();}
+                else if input.status=="pending" && matches!(task.status.as_str(),"failed"|"unknown"|"interrupted"){input.status="unknown".into();}
+            }
+        }
+        for event in current.events.iter().filter(|e|e.id.starts_with("delivery:")||e.id.starts_with("team:")) {if !task.events.iter().any(|e|e.id==event.id){task.events.push(event.clone());}}
+        if task.events.len()>100{task.events.drain(..task.events.len()-100);}
+        // The store owns delivery receipts, user edits and message-time source binding.
+        task.assignment=current.assignment.clone();task.team=current.team.clone();task.parent_link=current.parent_link.clone();task.team_input=current.team_input.clone();task.review_submission=current.review_submission.clone();task.code_workspace=current.code_workspace.clone();
+        task.artifacts=current.artifacts.clone();
+        task.delivery_submissions=current.delivery_submissions.clone();
+        task.explicit_delivery=current.explicit_delivery;task.delivery_error=current.delivery_error.clone();
+        let provided=task.provided_input_ids();
+        for message in &mut task.conversation {
+            if let Some(old)=current.conversation.iter().find(|m|m.run_id==message.run_id&&m.thread_id==message.thread_id&&m.item_id==message.item_id&&m.status=="completed") {*message=old.clone();}
+            else if message.run_id==task.run_id.as_deref().unwrap_or("")&&message.status=="completed" {message.source_input_ids=provided.clone();}
+            else {message.source_input_ids.clear();}
+        }
+        if task.status=="completed" {
+            let outcome=if task.parent_link.as_ref().is_some_and(|p|p.role=="review")||task.delivery_candidate.text.trim_start().starts_with("```orbit-review") {crate::team::commit_review(&mut task)}else{crate::delivery::commit(&mut task)};
+            match outcome {
+                Ok(true)=>{if task.delivery_submissions.len()>current.delivery_submissions.len(){task.delivery_error=None;task.event("成果已通过格式校验并保存，等待验收", "artifact", "工作台");task.events.last_mut().unwrap().id=format!("delivery:{}",uuid::Uuid::new_v4());}},
+                Ok(false)=>{},
+                Err(error)=>{let notice=format!("交付未保存：{error}");task.delivery_error=Some(notice.clone());if !current.events.iter().any(|e|e.text==notice){task.event(&notice,"error","交付");task.events.last_mut().unwrap().id=format!("delivery:{}",uuid::Uuid::new_v4());}}
+            }
+        }
+        task.executor_revision=Some(actor_revision);
         task.revision=task.revision.max(current.revision.checked_add(1).ok_or("任务版本超过限制")?);
         task.queue = current.queue.clone();
         task.acceptance = current.acceptance.clone();
-        if current.terminal() {
-            task.artifacts = current.artifacts.clone();
-        }
         validate(&task)?;
         let mut candidate = data.clone();
         candidate.tasks[index] = task.clone();
+        crate::team_store::advance(&mut candidate);
+        let task=candidate.tasks[index].clone();
         self.persist(&candidate)?;
         *data = candidate;
         Ok(Some(task))
@@ -256,15 +331,19 @@ impl Store {
             .position(|t| t.id == id)
             .ok_or("任务不存在")?;
         let task = &data.tasks[index];
+        crate::team_store::protect(&data,&task.id)?;
         if task.archived {
             return Ok(task.clone());
         }
+        crate::team_store::can_accept(&data,task)?;
         if !task.accepted() || task.queue.is_some() {
             return Err("请先验收最新交付并取消排队，再归档任务".into());
         }
         let mut candidate = data.clone();
+        if candidate.tasks[index].team.is_some(){if candidate.tasks.iter().any(|t|t.parent_link.as_ref().is_some_and(|l|l.parent_id==id)&&(!t.terminal()||t.queue.is_some())){return Err("请先核对所有子任务的结束状态".into())}for child in candidate.tasks.iter_mut().filter(|t|t.parent_link.as_ref().is_some_and(|l|l.parent_id==id)){child.archived=true;child.event("随父任务归档","system","工作台");}}
         candidate.tasks[index].archived = true;
         candidate.tasks[index].event("任务已归档", "system", "你");
+        crate::team_store::advance(&mut candidate);
         let saved = candidate.tasks[index].clone();
         self.persist(&candidate)?;
         *data = candidate;
@@ -273,11 +352,13 @@ impl Store {
     pub fn delete_task(&self, id: &str) -> Result<(), String> {
         let mut data = self.data.lock().unwrap();
         let task = data.tasks.iter().find(|t| t.id == id).ok_or("任务不存在")?;
-        if !task.archived {
-            return Err("请先归档任务后再删除".into());
+        crate::team_store::protect(&data,id)?;
+        if data.tasks.iter().any(|t|t.parent_link.as_ref().is_some_and(|p|p.parent_id==id)&&(!t.terminal()||t.queue.is_some())){return Err("子任务尚未结束或仍在队列中".into())}
+        if !task.archived&&(!task.terminal()||task.queue.is_some()||!task.current_delivery_ids().is_empty()) {
+            return Err("正式交付请先验收并归档；无交付任务请等执行结束且无排队后再删除".into());
         }
         let mut candidate = data.clone();
-        candidate.tasks.retain(|t| t.id != id);
+        candidate.tasks.retain(|t| t.id != id&&t.parent_link.as_ref().is_none_or(|p|p.parent_id!=id));
         self.persist(&candidate)?;
         *data = candidate;
         Ok(())
@@ -334,12 +415,13 @@ impl Store {
         }
         let (ti, ai) = matches[0];
         let task = &data.tasks[ti];
-        if task.archived {
+        if task.archived||task.parent_link.as_ref().is_some_and(|l|data.tasks.iter().any(|p|p.id==l.parent_id&&p.archived)) {
             return Err("归档交付只读，请导出后编辑".into());
         }
         if !task.terminal() || task.queue.is_some() {
             return Err("请等任务结束且无排队请求后再编辑交付物".into());
         }
+        if task.artifacts[ai].kind!="markdown" {return Err("仅 Markdown 成果支持编辑".into())}
         if task.artifacts[ai].content != expected {
             return Err("文档已更新，请保留草稿并重新打开".into());
         }
@@ -350,10 +432,22 @@ impl Store {
         candidate.tasks[ti].artifacts[ai].content = content.into();
         candidate.tasks[ti].acceptance = None;
         candidate.tasks[ti].event("已保存 Markdown 修改", "artifact", "你");
+        crate::team_store::advance(&mut candidate);
         let saved = candidate.tasks[ti].clone();
         self.persist(&candidate)?;
         *data = candidate;
         Ok(saved)
+    }
+    pub fn save_message(&self,id:&str,revision:u64,run:&str,thread:&str,item:&str)->Result<Task,String>{
+        let mut data=self.data.lock().unwrap();let index=data.tasks.iter().position(|t|t.id==id).ok_or("任务不存在")?;
+        let task=&data.tasks[index];
+        if task.revision!=revision||task.archived||task.queue.is_some()||!task.terminal(){return Err("请等任务结束且无排队请求后再保存回复".into())}
+        let message=task.conversation.iter().find(|m|m.run_id==run&&m.thread_id==thread&&m.item_id==item&&m.kind=="assistant"&&m.status=="completed"&&!m.truncated&&!m.text.trim().is_empty()).ok_or("消息不完整或不存在，无法保存")?;
+        if task.delivery_submissions.iter().any(|r|r.origin=="manual"&&r.run_id==run&&r.thread_id==thread&&r.item_id==item){return Ok(task.clone())}
+        if task.artifacts.len()>=10||task.delivery_submissions.len()>=10{return Err("已达到 10 份成果上限".into())}
+        let artifact=crate::model::Artifact{id:uuid::Uuid::new_v4().to_string(),name:format!("回复-{}.md",task.artifacts.len()+1),kind:"markdown".into(),content:message.text.clone(),created_at:crate::model::now(),source_input_ids:message.source_input_ids.clone()};
+        let receipt=crate::delivery::Receipt{id:uuid::Uuid::new_v4().to_string(),run_id:run.into(),turn_id:None,thread_id:thread.into(),item_id:item.into(),origin:"manual".into(),canonical:message.text.clone(),artifact_ids:vec![artifact.id.clone()]};
+        let mut candidate=data.clone();let next=&mut candidate.tasks[index];next.artifacts.push(artifact);next.delivery_submissions.push(receipt);next.event("回复已手动保存为 Markdown，不计为执行器交付","artifact","你");validate(next)?;let saved=next.clone();self.persist(&candidate)?;*data=candidate;Ok(saved)
     }
     pub fn export_settings(&self) -> ExportSettings {
         let data = self.data.lock().unwrap();
@@ -424,9 +518,11 @@ impl Store {
         let name = if name.ends_with(".md") || name.ends_with(".txt") {
             name
         } else {
-            "artifact.txt".into()
+            format!("{}.md",if name.is_empty(){"artifact"}else{&name})
         };
-        self.write_export(&data, &name, artifact.content.as_bytes())
+        let task=data.tasks.iter().find(|t|t.artifacts.iter().any(|a|a.id==id)).unwrap();
+        let content=format!("{}{}",crate::delivery::export_body(artifact)?,crate::sources::appendix(&task.source_inputs,&artifact.source_input_ids));
+        self.write_export(&data, &name, content.as_bytes())
     }
     pub fn export_workspace(&self) -> Result<String, String> {
         let (workspace,library,exported_at) = {
@@ -437,7 +533,8 @@ impl Store {
         };
         // Immutable PDF attachments are assembled after both snapshot locks are released.
         let library=self.library.export_snapshot(&library)?;
-        let snapshot=WorkspaceExport{format:"orbit-workspace",version:2,exported_at,workspace,library};
+        let code_bundles=crate::coding::export_bundles(&workspace.tasks)?;
+        let snapshot=WorkspaceExport{code_bundles,format:"orbit-workspace",version:5,exported_at,workspace,library};
         let bytes=serde_json::to_vec_pretty(&snapshot).map_err(|_|"无法编码工作台数据")?;
         self.write_export(&snapshot.workspace,&format!("orbit-workspace-{}.json",snapshot.exported_at),&bytes)
     }
@@ -448,7 +545,7 @@ impl Store {
     }
     pub fn collect_artifact(&self,id:&str)->Result<crate::knowledge::Document,String>{
         let data=self.workspace();let artifact=data.tasks.iter().flat_map(|t|&t.artifacts).find(|a|a.id==id).ok_or("交付文档不存在")?;
-        self.library.create(NewDocument{title:artifact.name.chars().take(128).collect(),kind:Kind::Markdown,content:artifact.content.clone(),url:None,tags:vec!["交付".into()]})
+        self.library.create(NewDocument{title:artifact.name.chars().take(128).collect(),kind:Kind::Markdown,content:format!("{}{}",crate::delivery::export_body(artifact)?,crate::sources::appendix(&data.tasks.iter().find(|t|t.artifacts.iter().any(|a|a.id==id)).unwrap().source_inputs,&artifact.source_input_ids)),url:None,tags:vec!["交付".into()]})
     }
     fn export_directory(&self, data: &Workspace) -> Result<PathBuf, String> {
         if let Some(selected) = &data.export_directory {
@@ -475,7 +572,7 @@ impl Store {
     }
     fn write_export(&self, data: &Workspace, name: &str, bytes: &[u8]) -> Result<String, String> {
         let directory = self.export_directory(data)?;
-        let destination = directory.join(format!("{}_{}", uuid::Uuid::new_v4(), name));
+        let destination = directory.join(format!("{}_{}", uuid::Uuid::new_v4(), export_filename(name)));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -491,7 +588,8 @@ impl Store {
         }
         Ok(destination.display().to_string())
     }
-    fn persist(&self, data: &Workspace) -> Result<(), String> {
+    pub(crate) fn persist(&self, data: &Workspace) -> Result<(), String> {
+        for task in &data.tasks{validate(task)?;}crate::team::validate_links(&data.tasks)?;
         if data.error.is_some() {
             return Err("原记录无法读取，已禁止覆盖；当前操作暂存内存".into());
         }
@@ -505,7 +603,8 @@ impl Store {
             })
             .collect();
         let bytes = serde_json::to_vec(&Disk {
-            version: 2,
+            version: 5,
+            agents:data.agents.clone(),
             tasks,
             export_directory: data.export_directory.clone(),
         })
@@ -528,7 +627,20 @@ impl Store {
         fs::rename(temporary, destination).map_err(|_| "记录替换失败，原文件保留".to_string())
     }
 }
-fn validate(task: &Task) -> Result<(), String> {
+fn export_filename(name:&str)->String{
+    let safe:String=name.chars().filter(|c|c.is_alphanumeric()||matches!(c,'.'|'_'|'-')).collect();
+    let (stem,suffix)=safe.rsplit_once('.').filter(|(_,ext)|!ext.is_empty()&&ext.len()<=10&&ext.bytes().all(|b|b.is_ascii_alphanumeric())).map(|(stem,ext)|(stem,format!(".{ext}"))).unwrap_or((&safe,String::new()));
+    // NAME_MAX=255 bytes, including the UUID and separator. Keep the extension intact.
+    let budget=255-37-suffix.len();let mut base=String::new();
+    for ch in stem.chars(){if base.len()+ch.len_utf8()>budget{break}base.push(ch);}
+    if base.is_empty(){base.push_str("artifact");}format!("{base}{suffix}")
+}
+pub(crate) fn validate(task: &Task) -> Result<(), String> {
+    crate::team::validate_task(task)?;
+    crate::delivery::validate_task(task)?;
+    if task.delivery_error.as_ref().is_some_and(|e|e.len()>2000){return Err("交付错误记录超限".into())}
+    crate::sources::validate_inputs(&task.source_inputs)?;
+    if task.artifacts.iter().any(|a|a.source_input_ids.len()>64||a.source_input_ids.iter().any(|id|!task.source_inputs.iter().any(|i|&i.id==id))) {return Err("交付来源记录无效".into())}
     if let Some(q)=&task.queue {
         if task.archived || q.request_id.is_empty() || q.request_id.len()>100 || q.next_run_id.is_empty() || q.next_run_id.len()>100 || q.order==0 || q.order>9_007_199_254_740_991 || !matches!(q.state.as_str(),"pending"|"claimed") || q.error.as_ref().is_some_and(|e|e.chars().count()>2000) {return Err("等待请求格式无效".into());}
         if let QueueAction::Continue{text,run_id,turn_id}=&q.action {if text.trim().is_empty() || text.chars().count()>2000 || run_id.as_ref().is_none_or(|r|r.is_empty()||r.len()>100) || turn_id.as_ref().is_some_and(|t|t.len()>100){return Err("续接请求格式无效".into());}}
@@ -550,9 +662,10 @@ fn validate(task: &Task) -> Result<(), String> {
             return Err("执行器与会话引用不一致或超出限制".into());
         }
     }
-    if task.archived && (task.status != "completed" || task.artifacts.is_empty()) {
+    if task.archived && if task.parent_link.is_some(){!task.terminal()}else{task.status != "completed" || task.artifacts.is_empty()} {
         return Err("归档记录缺少已完成的交付".into());
     }
+    if task.conversation.iter().any(|x|x.source_input_ids.len()>64||x.source_input_ids.iter().any(|id|!task.source_inputs.iter().any(|i|&i.id==id))) {return Err("消息来源记录无效".into())}
     let mut conversation_ids = std::collections::HashSet::new();
     if task.conversation.iter().any(|x| !conversation_ids.insert((&x.run_id, &x.thread_id, &x.item_id))) {
         return Err("对话记录包含重复消息标识".into());
@@ -582,7 +695,7 @@ fn validate(task: &Task) -> Result<(), String> {
         || task.prompt.len() > 48000
         || task.conversation.len() > crate::conversation::ITEM_LIMIT
         || task.conversation.iter().map(|x| x.text.chars().count()).sum::<usize>() > crate::conversation::TEXT_LIMIT
-        || task.conversation.iter().any(|x| x.run_id.is_empty() || x.run_id.len() > 100 || x.thread_id.is_empty() || x.thread_id.len() > 128 || x.item_id.is_empty() || x.item_id.len() > 128 || x.title.len() > 100 || x.text.chars().count() > crate::conversation::ITEM_TEXT_LIMIT || !matches!(x.kind.as_str(), "assistant" | "tool") || !matches!(x.status.as_str(), "running" | "completed" | "failed" | "unknown"))
+        || task.conversation.iter().any(|x| x.run_id.is_empty() || x.run_id.len() > 100 || x.thread_id.is_empty() || x.thread_id.len() > 400 || x.item_id.is_empty() || x.item_id.len() > 128 || x.title.len() > 100 || x.text.chars().count() > crate::conversation::ITEM_TEXT_LIMIT || !matches!(x.kind.as_str(), "assistant" | "tool") || !matches!(x.status.as_str(), "running" | "completed" | "failed" | "unknown"))
         || task.nodes.len() > 64
         || task.events.len() > 100
         || task.artifacts.len() > 10
@@ -638,7 +751,7 @@ mod tests {
             name: "doc.md".into(),
             kind: "markdown".into(),
             content: "# Original".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         task.acceptance=Some(Acceptance{run_id:task.run_id.clone(),turn_id:task.turn_id.clone(),artifact_ids:vec!["doc".into()]});
         task
@@ -866,7 +979,7 @@ mod tests {
         next.turn_id = Some("second".into());
         crate::protocol::project(
             &mut next,
-            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"second","item":{"id":"answer","type":"agentMessage","text":"new version"}}}),
+            &serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"second","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":crate::delivery::fixture("new version")}}}),
         );
         crate::protocol::project(
             &mut next,
@@ -894,11 +1007,7 @@ mod tests {
         demo.provider = "demo".into();
         demo.artifacts[0].content = "sample content".into();
         let file = directory.join("workspace.json");
-        let bytes = serde_json::to_vec(&Disk {
-            export_directory: None,
-            version: 1,
-            tasks: vec![demo.clone(), real.clone()],
-        })
+        let bytes = serde_json::to_vec(&serde_json::json!({"exportDirectory":null,"version":1,"tasks":[demo.clone(),real.clone()]}))
         .unwrap();
         fs::write(&file, &bytes).unwrap();
         let store = Store::open(directory.clone()).unwrap();
@@ -922,11 +1031,7 @@ mod tests {
         );
         let disk: Disk = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         assert!(disk.tasks.iter().all(|t| t.provider == "codex"));
-        let bytes = serde_json::to_vec(&Disk {
-            export_directory: None,
-            version: 1,
-            tasks: vec![demo],
-        })
+        let bytes = serde_json::to_vec(&serde_json::json!({"exportDirectory":null,"version":1,"tasks":[demo]}))
         .unwrap();
         fs::write(&file, &bytes).unwrap();
         let empty = Store::open(directory.clone()).unwrap();
@@ -948,11 +1053,7 @@ mod tests {
             }
             let mut demo = document();
             demo.provider = "demo".into();
-            let bytes = serde_json::to_vec(&Disk {
-                export_directory: None,
-                version: 1,
-                tasks: vec![demo, real],
-            })
+            let bytes = serde_json::to_vec(&serde_json::json!({"exportDirectory":null,"version":1,"tasks":[demo,real]}))
             .unwrap();
             let file = directory.join("workspace.json");
             fs::write(&file, &bytes).unwrap();
@@ -1371,7 +1472,7 @@ mod tests {
         assert_eq!(first.parent().unwrap(), chosen.canonicalize().unwrap());
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
         assert_eq!(value["format"], "orbit-workspace");
-        assert_eq!(value["version"], 2);
+        assert_eq!(value["version"], 5);
         assert!(value["exportedAt"].as_u64().unwrap() > 0);
         assert_eq!(
             value["exportDirectory"],
@@ -1474,7 +1575,7 @@ mod tests {
             name: "../../report.md".into(),
             kind: "markdown".into(),
             content: "safe text".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         store.save_task(task.clone()).unwrap();
         let mut fake = task;
@@ -1500,7 +1601,7 @@ mod tests {
         let organized=store.library.organize(&pdf.id,pdf.revision,vec![collection.id.clone()]).unwrap();
         let trashed=store.library.trash(&pdf.id,organized.revision).unwrap();
         let exported=store.export_workspace().unwrap();let value:serde_json::Value=serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
-        assert_eq!(value["version"],2);assert!(value["library"]["records"]["documents"].as_array().unwrap().iter().any(|d|d["id"]==doc.id&&d["content"]=="已提交正文"&&d["draft"]["content"]=="已存草稿"&&d["versions"][0]["content"]=="独立文档"));
+        assert_eq!(value["version"],5);assert!(value["library"]["records"]["documents"].as_array().unwrap().iter().any(|d|d["id"]==doc.id&&d["content"]=="已提交正文"&&d["draft"]["content"]=="已存草稿"&&d["versions"][0]["content"]=="独立文档"));
         assert_eq!(value["library"]["records"]["schemaVersion"],3);
         assert_eq!(value["library"]["records"]["collections"][0]["id"],collection.id);
         assert!(value["library"]["records"]["documents"].as_array().unwrap().iter().any(|d|d["id"]==pdf.id&&d["deletedAt"].is_number()&&d["revision"]==trashed.revision));
@@ -1545,7 +1646,7 @@ mod workflow_tests {
     #[test]
     fn acceptance_is_version_bound_and_edit_invalidates_it() {
         let s=store();let mut t=Task::new("review".into(),"goal".into(),"research".into());t.status="completed".into();t.turn_id=Some("turn".into());t.thread_id=Some("thread".into());
-        t.artifacts.push(Artifact{id:"artifact".into(),name:"result.md".into(),kind:"markdown".into(),content:"old".into(),created_at:0});s.save_task(t.clone()).unwrap();
+        t.artifacts.push(Artifact{id:"artifact".into(),name:"result.md".into(),kind:"markdown".into(),content:"old".into(),source_input_ids: vec![], created_at:0});s.save_task(t.clone()).unwrap();
         assert!(s.accept_task(&t.id,t.revision,&t.run_id,&Some("wrong".into())).is_err());
         assert!(s.archive_task(&t.id).is_err());
         let accepted=s.accept_task(&t.id,t.revision,&t.run_id,&t.turn_id).unwrap();assert!(accepted.accepted());
@@ -1562,7 +1663,7 @@ mod workflow_tests {
         let s=store();let t=fresh("codex");s.save_task(t.clone()).unwrap();s.enqueue(&t.id,t.revision,QueueAction::Start).unwrap();
         let (mut actor,_)=s.claim_next().unwrap().unwrap();let q=actor.queue.clone().unwrap();
         let platform=s.finish_claim(&t.id,&q.request_id,&q.next_run_id,None).unwrap();
-        actor.status="completed".into();actor.artifacts.push(Artifact{id:"fast".into(),name:"fast.md".into(),kind:"markdown".into(),content:"result".into(),created_at:0});actor.event("completed","system","executor");
+        actor.status="completed".into();actor.artifacts.push(Artifact{id:"fast".into(),name:"fast.md".into(),kind:"markdown".into(),content:"result".into(),source_input_ids: vec![], created_at:0});actor.event("completed","system","executor");
         assert_eq!(actor.revision,platform.revision);
         let completed=s.save_existing_task(actor.clone()).unwrap().expect("a genuine executor completion must survive platform bookkeeping");
         assert_eq!(completed.status,"completed");assert!(completed.queue.is_none());assert!(completed.revision>platform.revision);assert!(s.save_existing_task(actor).unwrap().is_none());
@@ -1575,7 +1676,9 @@ mod workflow_tests {
         std::fs::remove_dir(s.directory.join("workspace.tmp")).unwrap();
         let (claimed,_)=s.claim_next().unwrap().unwrap();let q=claimed.queue.unwrap();
         let failed=s.finish_claim(&t.id,&q.request_id,&q.next_run_id,Some("spawn failed".into())).unwrap();assert_eq!(failed.status,"unknown");assert!(failed.queue.as_ref().unwrap().error.is_some());assert!(s.claim_next().is_err());
-        let cancelled=s.cancel_queued(&t.id,failed.revision).unwrap();assert!(cancelled.queue.is_none());
+        assert!(s.cancel_queued(&t.id,failed.revision).is_err());
+        let preserved=s.task(&t.id).unwrap();assert_eq!(preserved.revision,failed.revision);assert_eq!(preserved.source_inputs,failed.source_inputs);assert_eq!(preserved.queue.as_ref().unwrap().request_id,q.request_id);
+        let cancelled=s.cancel_claimed(&t.id,failed.revision,&q.request_id,&q.next_run_id).unwrap();assert!(cancelled.queue.is_none());
         std::fs::remove_dir_all(s.directory).unwrap();
     }
 }

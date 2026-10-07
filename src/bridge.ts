@@ -23,9 +23,9 @@ export const listExecutorModels=(provider:string)=>invoke<import('./executors').
 export const checkCli=(provider:string)=>invoke<Doctor>('doctor',{provider});
 export const exportArtifact=(artifactId:string)=>invoke<string>('export_artifact',{artifactId});
 // Legacy storage/IPC still requires scene; it no longer controls UI or execution.
-export const createReal=(title:string,prompt:string,provider:string,requestedModel:string|null=null)=>invoke<Task>('create_task',{title,prompt,scene:'research',provider,requestedModel});
+export const createReal=(title:string,prompt:string,provider:string,requestedModel:string|null=null,sources:import("./taskSources").SourceRequest[]=[])=>invoke<Task>('create_task',{title,prompt,scene:'research',provider,requestedModel,sources});
 export const startReal=(task:Task)=>invoke<Task>('start_run',{taskId:task.id,revision:task.revision});
-export const steerReal=(runId:string,text:string)=>invoke('steer_run',{runId,text});
+export const steerReal=(runId:string,text:string,sources:import("./taskSources").SourceRequest[]=[])=>invoke('steer_run',{runId,text,sources});
 export const cancelReal=(runId:string)=>invoke('interrupt_run',{runId});
 export const replyReal=(runId:string,approvalId:string,answers:Record<string,string>)=>invoke('reply_input',{runId,approvalId,answers});
 
@@ -36,7 +36,7 @@ export const syncAgents=(taskId:string)=>invoke<Task>('sync_agents',{taskId});
 export const archiveTask=(taskId:string)=>invoke<Task>('archive_task',{taskId});
 export const deleteTask=(taskId:string)=>invoke('delete_task',{taskId});
 
-export const continueReal=(task:Task,text:string)=>invoke<Task>('continue_task',{taskId:task.id,revision:task.revision,runId:task.runId,turnId:task.turnId,text});
+export const continueReal=(task:Task,text:string,sources:import("./taskSources").SourceRequest[]=[])=>invoke<Task>('continue_task',{taskId:task.id,revision:task.revision,runId:task.runId,turnId:task.turnId,text,sources});
 
 export interface ExportSettings { directory:string; custom:boolean }
 export const getExportSettings=()=>invoke<ExportSettings>('get_export_settings');
@@ -73,3 +73,19 @@ export const pauseQueue=(paused:boolean)=>invoke<QueueState>('set_queue_paused',
 export const cancelQueued=(task:Task)=>invoke<Task>('cancel_queued',{taskId:task.id,revision:task.revision});
 export const acceptTask=(task:Task)=>invoke<Task>('accept_task',{taskId:task.id,revision:task.revision,runId:task.runId,turnId:task.turnId});
 export const watchQueue=async(callback:(queue:QueueState)=>void)=>desktop?listen<QueueState>('runtime-queue',event=>callback(event.payload)):()=>{};
+
+export const saveMessage=(task:Task,item:import("./model").ChatItem)=>invoke<Task>("save_message",{taskId:task.id,revision:task.revision,runId:item.runId,threadId:item.threadId,itemId:item.itemId});
+
+export const listAgents=():Promise<import('./teams').AgentProfile[]>=>desktop?invoke('list_agents'):import('./teams').then(m=>m.defaultProfiles());
+export const saveAgent=(agent:import('./teams').AgentProfile)=>invoke<import('./teams').AgentProfile>('save_agent',{agent});
+export const deleteAgent=(agent:import('./teams').AgentProfile)=>invoke<void>('delete_agent',{agentId:agent.id,revision:agent.revision});
+export const createTeam=(draft:import('./teams').PlanDraft)=>invoke<Task>('create_team',{draft});
+export const confirmTeam=(task:Task)=>invoke<Task>('confirm_team',{taskId:task.id,revision:task.revision,version:task.team!.plan.version});
+export const reviseTeam=(task:Task,draft:import('./teams').PlanDraft)=>invoke<Task>('revise_team',{taskId:task.id,revision:task.revision,draft});
+export const reviseSummary=(task:Task,text:string)=>invoke<Task>('revise_summary',{taskId:task.id,revision:task.revision,text});
+export const cancelTeam=(task:Task)=>invoke<Task>('cancel_team',{taskId:task.id,revision:task.revision});
+export const chooseGitProject=(target:string)=>invoke<import('./teams').Project|null>('choose_git_project',{target});
+export const snapshotCode=(task:Task)=>invoke<Task>('snapshot_code',{taskId:task.id,revision:task.revision});
+export const integrateCode=(task:Task)=>invoke<Task>('integrate_code',{taskId:task.id,revision:task.revision});
+export const mergeCode=(task:Task)=>invoke<Task>('merge_code',{taskId:task.id,revision:task.revision});
+export const openCodeWorkspace=(task:Task)=>invoke<void>('open_code_workspace',{taskId:task.id});

@@ -18,7 +18,8 @@ for line in sys.stdin:
         emit({"method": "session/update", "params": {"sessionId": "fixture-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OLD HISTORY"}}}})
         emit({"id": request["id"], "result": {}})
     elif method == "session/prompt":
-        text = "FIRST" if request["params"]["prompt"][0]["text"] == "original" else "SECOND"
+        text = "FIRST" if request["params"]["prompt"][0]["text"]  .startswith("original\n\n") else "SECOND"
+        text = "```orbit-delivery\n" + json.dumps({"schemaVersion": 1, "submissionId": "fixture", "items": [{"kind": "markdown", "name": "result.md", "content": text}]}) + "\n```"
         emit({"method": "session/update", "params": {"sessionId": "foreign-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "FOREIGN"}}}})
         emit({"method": "session/update", "params": {"sessionId": "fixture-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
         emit({"id": request["id"], "result": {"stopReason": "end_turn"}})

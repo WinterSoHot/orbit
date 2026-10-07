@@ -20,6 +20,7 @@ pub struct ChatItem {
     pub truncated: bool,
     pub exit_code: Option<i64>,
     pub at: u64,
+    #[serde(default)] pub source_input_ids: Vec<String>,
 }
 
 impl Task {
@@ -67,7 +68,7 @@ pub fn project(task: &mut Task, method: &str, params: &Value) -> bool {
             task.revision += 1;
             return true;
         }
-        task.conversation.push(ChatItem { run_id: run.into(), thread_id: thread.into(), item_id: id.into(), kind: kind.into(), title: title.into(), status: "running".into(), text: String::new(), final_answer: false, truncated: false, exit_code: None, at: now() });
+        task.conversation.push(ChatItem { run_id: run.into(), thread_id: thread.into(), item_id: id.into(), kind: kind.into(), title: title.into(), status: "running".into(), text: String::new(), final_answer: false, truncated: false, exit_code: None, at: now(), source_input_ids: vec![] });
     }
     let index = index.unwrap_or(task.conversation.len() - 1);
     let previous = &task.conversation[index];
@@ -91,6 +92,16 @@ pub fn project(task: &mut Task, method: &str, params: &Value) -> bool {
     }
     task.revision += 1;
     true
+}
+
+// ACP has a session identity but no public message ID. One stable root item per run.
+pub fn qoder_output(task:&mut Task,text:&str,completed:bool,truncated:bool) {
+    let Some(session)=task.session_ref.as_ref() else{return};let Some(run)=task.run_id.as_ref() else{return};
+    let key=(run.clone(),session.id.clone());let index=task.conversation.iter().position(|x|x.run_id==key.0&&x.thread_id==key.1&&x.item_id=="qoder-response");
+    if index.is_none(){if task.conversation.len()>=ITEM_LIMIT{task.conversation_truncated=true;return}task.conversation.push(ChatItem{run_id:key.0,thread_id:key.1,item_id:"qoder-response".into(),kind:"assistant".into(),title:"".into(),status:"running".into(),text:String::new(),final_answer:false,truncated:false,exit_code:None,at:now(),source_input_ids:vec![]});}
+    let index=index.unwrap_or(task.conversation.len()-1);let used=task.conversation.iter().enumerate().filter(|(i,_)|*i!=index).map(|(_,x)|x.text.chars().count()).sum::<usize>();
+    let limit=ITEM_TEXT_LIMIT.min(TEXT_LIMIT.saturating_sub(used));let item=&mut task.conversation[index];item.text=text.chars().take(limit).collect();item.truncated=truncated||text.chars().count()>limit;item.status=if completed{"completed"}else{"running"}.into();item.final_answer=completed;
+    if item.truncated{task.conversation_truncated=true;}
 }
 
 #[cfg(test)]

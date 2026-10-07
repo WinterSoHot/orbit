@@ -5,15 +5,20 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ArrowDownToLine, Code2, Eye, FileText, Loader2, Save, BookOpen, X } from 'lucide-react';
 import type { AgentNode, Artifact } from './model';
+import {SourceCards} from './SourceComposer';
+import type {DocumentNavigator} from './SourceComposer';
+import type {SourceInput} from './taskSources';
 
-export function ArtifactEditor({artifact,readOnly=false,onClose,onSave,onDownload,onCollect}:{artifact:Artifact;readOnly?:boolean;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void;onCollect?:(file:Artifact)=>void}) {
+export function ArtifactEditor({artifact,readOnly=false,onClose,onSave,onDownload,onCollect,onDocument,sourceInputs=[]}:{sourceInputs?:SourceInput[];onDocument?:DocumentNavigator;artifact:Artifact;readOnly?:boolean;onClose:()=>void;onSave:(expected:string,content:string)=>Promise<Artifact>;onDownload:(file:Artifact)=>void;onCollect?:(file:Artifact)=>void}) {
   const [saved,setSaved]=useState(artifact),[draft,setDraft]=useState(artifact.content);
   const [mode,setMode]=useState<'preview'|'edit'>('preview'),[saving,setSaving]=useState(false),[error,setError]=useState(''),[confirm,setConfirm]=useState(false);
   const pending=useRef(false),dialog=useRef<HTMLElement>(null);
-  const dirty=draft!==saved.content;
+  const editable=!readOnly&&artifact.kind==='markdown';
+  const dirty=editable&&draft!==saved.content;
+  function openDocument(id:string,location?:DocumentLocation){if(pending.current||dirty){setError("请先保存文档修改，再打开来源");return;}onDocument?.(id,location);}
   function close(){if(pending.current)return;if(dirty)setConfirm(true);else onClose();}
   async function save(closeAfter=false){
-    if(pending.current||readOnly)return;
+    if(pending.current||!editable)return;
     if(!dirty){if(closeAfter)onClose();return;}
     pending.current=true;setSaving(true);setError('');
     try{const result=await onSave(saved.content,draft);setSaved(result);setDraft(result.content);setConfirm(false);if(closeAfter)onClose();}
@@ -39,15 +44,29 @@ export function ArtifactEditor({artifact,readOnly=false,onClose,onSave,onDownloa
     window.addEventListener('keydown',key,true);return()=>window.removeEventListener('keydown',key,true);
   });
   return <div className="modal-backdrop" onClick={close}>
-    <section ref={dialog} className="document-modal" role="dialog" aria-modal="true" aria-label="Markdown 文档" onClick={e=>e.stopPropagation()}>
+    <section ref={dialog} className="document-modal" role="dialog" aria-modal="true" aria-label="交付成果" onClick={e=>e.stopPropagation()}>
       <div className="modal-heading"><div><FileText size={19}/><h2>{artifact.name}</h2></div><button className="icon-button" aria-label="关闭文档" disabled={saving} onClick={close}><X size={19}/></button></div>
-      <div className="document-toolbar">{!readOnly&&<div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div>}<span className={dirty?'document-dirty':''}>{readOnly?'归档交付 · 只读':saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span>{!readOnly&&<button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button>}</div>
-      {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<MarkdownBody content={draft}/>}
+      <div className="document-toolbar">{editable&&<div className="document-tabs" role="tablist" aria-label="文档模式"><button role="tab" aria-selected={mode==='preview'} onClick={()=>setMode('preview')}><Eye size={15}/>预览</button><button role="tab" aria-selected={mode==='edit'} onClick={()=>setMode('edit')}><Code2 size={15}/>编辑</button></div>}<span className={dirty?'document-dirty':''}>{!editable?'成果只读':saving?'正在保存…':dirty?'有未保存修改':'已保存版本'}</span>{editable&&<button className="secondary-button compact" disabled={!dirty||saving} onClick={()=>void save()}>{saving?<Loader2 size={14} className="spin"/>:<Save size={14}/>}保存</button>}</div>
+      {mode==='edit'?<textarea className="document-source" aria-label="Markdown 源码" spellCheck={false} value={draft} disabled={saving} onChange={e=>setDraft(e.target.value)}/>:<div className="artifact-reading"><ArtifactBody artifact={{...saved,content:draft}} onDocument={onDocument?openDocument:undefined}/><div className="source-artifact"><SourceCards inputs={sourceInputs} onDocument={onDocument?openDocument:undefined}/></div></div>}
       {error&&<div className="document-error" role="alert">{error}</div>}
       {confirm&&<div className="document-close-confirm" role="alertdialog" aria-label="未保存修改"><div><strong>保存修改后关闭？</strong><span>你的修改尚未保存到本地。</span></div><button className="secondary-button compact" disabled={saving} onClick={()=>setConfirm(false)}>继续编辑</button><button className="secondary-button compact" disabled={saving} onClick={onClose}>丢弃并关闭</button><button className="primary-button compact" disabled={saving} onClick={()=>void save(true)}>保存并关闭</button></div>}
-      <div className="modal-footer"><span>{readOnly?'Markdown · 归档交付':'Markdown · ⌘ / Ctrl S 保存'}</span>{onCollect&&<button className="secondary-button" disabled={dirty||saving} onClick={()=>onCollect(saved)}><BookOpen size={15}/>存入知识库</button>}<button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
+      <div className="modal-footer"><span>{editable?'Markdown · ⌘ / Ctrl S 保存':`${artifact.kind==='link'?'成果链接':artifact.kind==='result'?'执行结果':'Markdown'} · 只读`}</span>{onCollect&&<button className="secondary-button" disabled={dirty||saving} onClick={()=>onCollect(saved)}><BookOpen size={15}/>存入知识库</button>}<button className="primary-button" disabled={dirty||saving} onClick={()=>onDownload(saved)}><ArrowDownToLine size={15}/>下载文件</button></div>
     </section>
   </div>;
+}
+
+export function ArtifactBody({artifact,onDocument}:{artifact:Artifact;onDocument?:DocumentNavigator}){
+  if(artifact.kind==='markdown')return <MarkdownBody content={artifact.content} onDocument={onDocument}/>;
+  if(artifact.kind==='link'){
+    let safe=false;try{const url=new URL(artifact.content);safe=['http:','https:'].includes(url.protocol)&&!!url.hostname&&!url.username&&!url.password;}catch{/* Invalid imported links stay inert. */}
+    return <article className="markdown-body"><p>{safe?<a href={artifact.content} target="_blank" rel="noopener noreferrer">{artifact.content}</a>:'无效的成果链接'}</p><p className="subtle">链接由执行器提供，未自动访问或验证。</p></article>;
+  }
+  if(artifact.kind==='result'){
+    let result:{summary:string;evidence:string[]}|null=null;
+    try{const data=JSON.parse(artifact.content);if(data.kind==='result'&&data.name===artifact.name&&typeof data.summary==='string'&&Array.isArray(data.evidence)&&data.evidence.every((e:unknown)=>typeof e==='string'))result=data;}catch{/* Preserve malformed data for export diagnostics. */}
+    return <article className="markdown-body">{result?<><p style={{whiteSpace:'pre-wrap'}}>{result.summary}</p><h3>提供的证据</h3><ul>{result.evidence.map((e,i)=><li key={i}>{e}</li>)}</ul><p className="subtle">以上为执行器报告，尚未独立验证。</p></>:<p role="alert">结果交付内容无效</p>}</article>;
+  }
+  return <p role="alert">不支持的成果类型</p>;
 }
 
 export function MarkdownBody({content,onDocument,inertLinks=false}:{inertLinks?:boolean;content:string;onDocument?:(id:string,location?:DocumentLocation)=>void}) {

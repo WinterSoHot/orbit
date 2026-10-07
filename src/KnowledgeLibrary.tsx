@@ -12,7 +12,7 @@ export interface LibraryHandle {flush:()=>Promise<void>}
 const emptyGroup=():SmartGroup=>({id:'',name:'',revision:0,kind:null,tag:'',keyword:'',updatedDays:null});
 const typeIcon=(kind:DocumentKind,size=16)=>{const Icon=kind==='web'?Globe:kind==='markdown'?FileCode2:FileText;return <Icon size={size} strokeWidth={1.75} aria-hidden="true"/>;};
 const message=(e:unknown)=>e instanceof Error?e.message:String(e);
-export const KnowledgeLibrary=forwardRef<LibraryHandle,{onNotice:(message:string)=>void}>(function KnowledgeLibrary({onNotice},ref){
+export const KnowledgeLibrary=forwardRef<LibraryHandle,{onNotice:(message:string)=>void;openLocation?:DocumentLocation|null}>(function KnowledgeLibrary({onNotice,openLocation},ref){
  const [library,setLibrary]=useState<Library>({documents:[],groups:[],collections:[],schemaVersion:3,error:null}),[loaded,setLoaded]=useState(false),[selected,setSelected]=useState<string|null>(null);
  const [kind,setKind]=useState<DocumentKind|null>(null),[tag,setTag]=useState(''),[groupId,setGroupId]=useState(''),[query,setQuery]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
  const [newType,setNewType]=useState<'markdown'|'web'|null>(null),[title,setTitle]=useState(''),[url,setUrl]=useState(''),[content,setContent]=useState(''),[capture,setCapture]=useState(true),[groupDraft,setGroupDraft]=useState<SmartGroup|null>(null);
@@ -23,6 +23,7 @@ export const KnowledgeLibrary=forwardRef<LibraryHandle,{onNotice:(message:string
  const selectedDocument=library.documents.find(d=>d.id===selected);
  useImperativeHandle(ref,()=>({flush:async()=>{await editor.current?.flush();}}));
  useEffect(()=>{let active=true;loadLibrary().then(data=>{if(active){setLibrary(data);setLoaded(true);}}).catch(reason=>{if(active){setError(message(reason));setLoaded(true);}});return()=>{active=false;};},[]);
+ useEffect(()=>{if(loaded&&openLocation)select(openLocation.id,openLocation);},[loaded,openLocation]);
  function saved(doc:LibraryDocument){setLibrary(current=>({...current,documents:current.documents.map(d=>d.id===doc.id?mergeReaderDocument(d,doc):d)}));}
  function inserted(doc:LibraryDocument){setLibrary(current=>({...current,documents:[doc,...current.documents.filter(d=>d.id!==doc.id)]}));}
  function external(doc:LibraryDocument){saved(doc);setGeneration(n=>n+1);}

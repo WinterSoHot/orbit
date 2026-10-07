@@ -129,6 +129,9 @@ pub struct Doctor {
     pub capabilities: Capabilities,
 }
 
+#[derive(Clone, Debug)]
+pub struct Ownership {pub task_id:String,pub run_id:String,pub session_id:Option<String>}
+
 #[cfg(feature = "desktop")]
 pub trait Executor: Send + Sync {
     fn descriptor(&self) -> Descriptor;
@@ -137,6 +140,8 @@ pub trait Executor: Send + Sync {
         Err(format!("{} 尚未开放模型目录", self.descriptor().name))
     }
     fn ensure_idle(&self) -> Result<(), String>;
+    fn ownership(&self) -> Vec<Ownership> {vec![]}
+    fn abort_start(&self, app:tauri::AppHandle,run_id:String)->Result<(),String>{self.interrupt(app,run_id)}
     fn ensure_task_idle(&self, task_id: &str) -> Result<(), String>;
     fn launch(
         &self,
@@ -150,6 +155,9 @@ pub trait Executor: Send + Sync {
             "{} 当前接入方式不支持运行中补充；请等待交付结束",
             self.descriptor().name
         ))
+    }
+    fn steer_sources(&self,app:&tauri::AppHandle,run_id:String,text:String,sources:Vec<crate::sources::SourceSnapshot>)->Result<(),String>{
+        if sources.is_empty(){self.steer(app,run_id,text)}else{Err("当前执行器不支持运行中引用资料，请等待本轮结束".into())}
     }
     fn reply(
         &self,

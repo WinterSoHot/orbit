@@ -73,3 +73,10 @@ test('board separates pending work, review and accepted deliveries', () => {
   assert.equal(applyRuntime({...task,queue},incoming).runId,'run-2');
   assert.equal(applyRuntime({...task,queue},{...incoming,runId:'unrelated'}).runId,'run-1');
 });
+
+test('manual and historical artifacts cannot fill an explicit current delivery',()=>{
+  const task={...fixture(),status:'completed' as const,explicitDelivery:true,runId:'current',turnId:'turn',artifacts:[{id:'old',name:'old.md',kind:'markdown',content:'old',createdAt:0},{id:'manual',name:'reply.md',kind:'markdown',content:'reply',createdAt:1}],deliverySubmissions:[{id:'old',runId:'old-run',turnId:'turn',threadId:'thread',itemId:'reply',origin:'executor' as const,artifactIds:['old']},{id:'manual',runId:'current',turnId:null,threadId:'thread',itemId:'reply',origin:'manual' as const,artifactIds:['manual']}],acceptance:{runId:'current',turnId:'turn',artifactIds:['old','manual']}};
+  assert.equal(boardColumn(task),'attention');
+  const current={...task,deliverySubmissions:[...task.deliverySubmissions,{id:'new',runId:'current',turnId:'turn',threadId:'thread',itemId:'submitted',origin:'executor' as const,artifactIds:['new']}],artifacts:[...task.artifacts,{id:'new',name:'new.md',kind:'markdown',content:'new',createdAt:2}],acceptance:{runId:'current',turnId:'turn',artifactIds:['new']}};
+  assert.equal(boardColumn(current),'done');
+});

@@ -1,5 +1,12 @@
 mod executor;
 mod model;
+mod delivery;
+mod team;
+#[cfg(feature="desktop")]
+mod team_store;
+#[cfg(feature="desktop")]
+mod coding;
+mod sources;
 mod conversation;
 #[cfg(feature = "desktop")]
 mod knowledge;
@@ -29,6 +36,35 @@ mod desktop {
     use tauri_plugin_dialog::DialogExt;
 
     #[tauri::command]
+    fn list_agents(runtime:State<Runtime>)->Vec<crate::team::AgentProfile>{runtime.agents()}
+    #[tauri::command]
+    fn save_agent(runtime:State<Runtime>,agent:crate::team::AgentProfile)->Result<crate::team::AgentProfile,String>{runtime.save_agent(agent)}
+    #[tauri::command]
+    fn delete_agent(runtime:State<Runtime>,agent_id:String,revision:u64)->Result<(),String>{runtime.delete_agent(agent_id,revision)}
+    #[tauri::command]
+    async fn create_team(app:AppHandle,runtime:State<'_,Runtime>,draft:crate::team::PlanDraft)->Result<Task,String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.create_team(&app,draft)).await.map_err(|_|"创建团队失败".to_string())?}
+    #[tauri::command]
+    fn confirm_team(app:AppHandle,runtime:State<Runtime>,task_id:String,revision:u64,version:String)->Result<Task,String>{runtime.confirm_team(&app,task_id,revision,version)}
+    #[tauri::command]
+    async fn revise_team(app:AppHandle,runtime:State<'_,Runtime>,task_id:String,revision:u64,draft:crate::team::PlanDraft)->Result<Task,String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.revise_team(&app,task_id,revision,draft)).await.map_err(|_|"修改计划失败".to_string())?}
+    #[tauri::command]
+    fn revise_summary(app:AppHandle,runtime:State<Runtime>,task_id:String,revision:u64,text:String)->Result<Task,String>{runtime.revise_summary(&app,task_id,revision,text)}
+    #[tauri::command]
+    fn cancel_team(app:AppHandle,runtime:State<Runtime>,task_id:String,revision:u64)->Result<Task,String>{runtime.cancel_team(&app,task_id,revision)}
+    #[tauri::command]
+    async fn choose_git_project(app:AppHandle,target:String)->Result<Option<crate::team::Project>,String>{tauri::async_runtime::spawn_blocking(move||{
+      let mut dialog=app.dialog().file().set_title("选择干净的本地 Git 项目");if let Some(w)=app.get_webview_window("main"){dialog=dialog.set_parent(&w);}
+      match dialog.blocking_pick_folder(){None=>Ok(None),Some(p)=>{let path=p.into_path().map_err(|_|"请选择本地文件夹")?;let branch=if target.trim().is_empty(){crate::coding::default_target(&path)?}else{target};crate::coding::preflight(&path,&branch).map(Some)}}
+    }).await.map_err(|_|"项目选择失败".to_string())?}
+    #[tauri::command]
+    async fn snapshot_code(app:AppHandle,runtime:State<'_,Runtime>,task_id:String,revision:u64)->Result<Task,String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.snapshot_code(&app,task_id,revision)).await.map_err(|_|"保存快照失败".to_string())?}
+    #[tauri::command]
+    async fn integrate_code(app:AppHandle,runtime:State<'_,Runtime>,task_id:String,revision:u64)->Result<Task,String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.integrate_code(&app,task_id,revision)).await.map_err(|_|"集成失败".to_string())?}
+    #[tauri::command]
+    async fn merge_code(app:AppHandle,runtime:State<'_,Runtime>,task_id:String,revision:u64)->Result<Task,String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.merge_code(&app,task_id,revision)).await.map_err(|_|"合并失败".to_string())?}
+    #[tauri::command]
+    async fn open_code_workspace(runtime:State<'_,Runtime>,task_id:String)->Result<(),String>{let r=runtime.inner().clone();tauri::async_runtime::spawn_blocking(move||r.open_code_workspace(task_id)).await.map_err(|_|"打开工作区失败".to_string())?}
+    #[tauri::command]
     fn load_workspace(runtime: State<Runtime>) -> Workspace {
         runtime.store.workspace()
     }
@@ -47,6 +83,8 @@ mod desktop {
             .await
             .map_err(|_| "协作记录读取进程失败".to_string())?
     }
+    #[tauri::command]
+    fn save_message(runtime:State<Runtime>,task_id:String,revision:u64,run_id:String,thread_id:String,item_id:String)->Result<Task,String>{runtime.save_message(task_id,revision,run_id,thread_id,item_id)}
     #[tauri::command]
     fn edit_artifact(
         runtime: State<Runtime>,
@@ -207,13 +245,14 @@ mod desktop {
         scene: String,
         provider: Option<String>,
         requested_model: Option<String>,
+        sources:Option<Vec<crate::sources::SourceRequest>>,
     ) -> Result<Task, String> {
-        runtime.create(
+        runtime.create_with_sources(
             title,
             prompt,
             scene,
             provider.unwrap_or_else(|| "codex".into()),
-            requested_model,
+            requested_model, sources.unwrap_or_default(),
         )
     }
     #[tauri::command]
@@ -251,10 +290,11 @@ mod desktop {
         run_id: Option<String>,
         turn_id: Option<String>,
         text: String,
+        sources:Option<Vec<crate::sources::SourceRequest>>,
     ) -> Result<Task, String> {
         let owned = runtime.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
-            owned.continue_task(app, task_id, revision, run_id, turn_id, text)
+            owned.continue_task(app, task_id, revision, run_id, turn_id, text,sources.unwrap_or_default())
         })
         .await
         .map_err(|_| "续接进程失败".to_string())?
@@ -265,8 +305,9 @@ mod desktop {
         runtime: State<Runtime>,
         run_id: String,
         text: String,
+        sources:Option<Vec<crate::sources::SourceRequest>>,
     ) -> Result<(), String> {
-        runtime.steer(&app, run_id, text)
+        runtime.steer_sources(&app, run_id, text,sources.unwrap_or_default())
     }
     #[tauri::command]
     fn interrupt_run(
@@ -335,11 +376,12 @@ mod desktop {
                 export_document,
                 collect_artifact,
                 import_documents,
-                edit_artifact,
+                edit_artifact, save_message,
                 sync_agents,
                 doctor,
                 list_executors,
                 list_executor_models,
+                list_agents, save_agent, delete_agent, create_team, confirm_team, revise_team, revise_summary, cancel_team, choose_git_project, snapshot_code, integrate_code, merge_code, open_code_workspace,
                 create_task,
                 load_queue_state, set_queue_paused, cancel_queued, accept_task,
                 start_run,
@@ -367,3 +409,8 @@ mod desktop {
 }
 #[cfg(feature = "desktop")]
 pub use desktop::run;
+
+#[cfg(all(test,feature="desktop"))]
+mod team_tests;
+#[cfg(all(test,feature="desktop"))]
+mod coding_tests;

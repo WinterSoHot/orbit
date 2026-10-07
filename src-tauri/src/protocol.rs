@@ -1,4 +1,5 @@
-use crate::model::{now, Artifact, Node, Task};
+use crate::model::{now, Node, Task};
+#[cfg(test)] use crate::model::Artifact;
 use serde_json::Value;
 use std::io::{BufRead, Read};
 
@@ -27,7 +28,7 @@ pub fn select_model(result: &Value, cursors: &mut Vec<String>) -> Result<ModelCh
     Ok(ModelChoice::NextPage(cursor.into()))
 }
 pub fn thread_request(directory: &std::path::Path, model: &str) -> Value {
-    serde_json::json!({"id":2,"method":"thread/start","params":{"model":model,"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。将最终交付直接写在回答中。","ephemeral":false}})
+    serde_json::json!({"id":2,"method":"thread/start","params":{"model":model,"cwd":directory.to_string_lossy(),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","developerInstructions":"本次任务仅允许只读操作。不要修改文件，不要调用会产生外部写入的 MCP 工具。普通回复留在对话；明确交付须按本轮提交契约输出，未完成或需要澄清时不得提交。","ephemeral":false}})
 }
 pub fn resume_request(thread: &str, model: &str) -> Value {
     let mut request = thread_request(std::path::Path::new("/"), model);
@@ -55,6 +56,7 @@ pub fn validate_resume(thread: &Value, expected: &str, previous_turn: &str) -> R
     Ok(())
 }
 pub fn turn_request(thread: &str, input: &str) -> Value {
+    let input=crate::delivery::instruction(input);
     serde_json::json!({"id":3,"method":"turn/start","params":{"threadId":thread,"input":[{"type":"text","text":input}],"sandboxPolicy":{"type":"readOnly"}}})
 }
 // Only error.message is read; never persist raw protocol payloads or stderr.
@@ -372,7 +374,7 @@ pub fn project(task: &mut Task, message: &Value) -> bool {
             if let Some(n) = task.nodes.iter_mut().find(|n| n.id == root) {
                 n.status = task.status.clone();
                 n.summary = match status {
-                    "completed" => "本轮执行结束，等待验收".into(),
+                    "completed" => "本轮执行结束".into(),
                     "interrupted" => "本轮执行已终止".into(),
                     _ => failure.clone(),
                 };
@@ -384,27 +386,10 @@ pub fn project(task: &mut Task, message: &Value) -> bool {
                     node.status = "unknown".into();
                 }
             }
-            if status == "completed" {
-                let content = task
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == root)
-                    .map(|n| n.output.clone())
-                    .unwrap_or_default();
-                if !content.is_empty() {
-                    task.artifacts.push(Artifact {
-                        id: format!("{}-result", task.run_id.as_deref().unwrap_or("run")),
-                        name: format!("codex-result-v{}.md", task.artifacts.len() + 1),
-                        kind: "markdown".into(),
-                        content,
-                        created_at: now(),
-                    });
-                }
-            }
             task.answer_items.clear();
             task.event(
                 if status == "completed" {
-                    "本轮执行结束，输出等待验收"
+                    "本轮执行结束，回复已保留"
                 } else if status == "interrupted" {
                     "执行器确认本轮已中断"
                 } else {
@@ -428,6 +413,7 @@ pub fn project(task: &mut Task, message: &Value) -> bool {
                         && matches!(item["phase"].as_str(), None | Some("final_answer"))
                     {
                         task.collect_answer(text(item, "id"), text(item, "text"));
+                        if item["phase"]=="final_answer" && p["turnId"].as_str().is_some_and(|id|!id.is_empty()&&Some(id)==task.turn_id.as_deref()) && matches!(item["status"].as_str(),None|Some("completed")) {task.delivery_candidate.capture(text(item,"id"),text(item,"text"));}
                     } else if thread != root || task.answer_items.is_empty() {
                         if let Some(n) = task.nodes.iter_mut().find(|n| n.id == thread) {
                             n.output = text(item, "text").chars().take(64000).collect();
@@ -781,6 +767,13 @@ pub fn reconcile_agent_history(task: &Task, history: &AgentHistory) -> Result<Ta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordinary_final_reply_does_not_become_a_delivery() {
+        let mut t=crate::model::Task::new("test".into(),"goal".into(),"research".into());t.thread_id=Some("root".into());t.turn_id=Some("turn".into());
+        super::project(&mut t,&serde_json::json!({"method":"item/completed","params":{"threadId":"root","turnId":"turn","item":{"id":"reply","type":"agentMessage","phase":"final_answer","text":"Which option should I choose?"}}}));
+        super::project(&mut t,&serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn","status":"completed"}}}));
+        assert!(t.artifacts.is_empty());assert_eq!(t.conversation[0].text,"Which option should I choose?");
+    }
     use super::*;
     use crate::model::Approval;
     use serde_json::json;
@@ -813,7 +806,9 @@ mod tests {
             &mut task,
             &serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"completed"}}}),
         );
-        assert_eq!(task.artifacts[0].content, "legacy answer");
+        assert!(task.artifacts.is_empty());
+        assert_eq!(task.conversation.iter().filter(|m|m.item_id=="same").count(),1);
+        assert_eq!(task.nodes[0].output,"legacy answer");
         assert!(task.answer_items.is_empty());
         let mut task = fixture();
         task.root_node();
@@ -831,7 +826,7 @@ mod tests {
         assert!(task.nodes.is_empty());
     }
     #[test]
-    fn two_final_answers_in_a_steered_turn_are_both_delivered() {
+    fn two_final_answers_stay_in_chat_without_a_delivery() {
         let mut task = fixture();
         project(
             &mut task,
@@ -845,10 +840,12 @@ mod tests {
             &mut task,
             &serde_json::json!({"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn-1","status":"completed"}}}),
         );
-        assert!(task.artifacts[0].content.contains("original complete plan"));
-        assert!(task.artifacts[0]
-            .content
-            .contains("additional storage design"));
+        assert!(task.artifacts.is_empty());
+        assert!(task.nodes[0].output.contains("original complete plan"));
+        assert!(task.nodes[0].output.contains("additional storage design"));
+        assert_eq!(task.conversation.len(),2);
+        assert!(!crate::delivery::commit(&mut task).unwrap());
+
     }
     #[test]
     fn catalog_default_is_explicit_and_hidden_models_are_not_selected() {
@@ -1043,7 +1040,7 @@ mod tests {
             name: "doc.md".into(),
             kind: "markdown".into(),
             content: "user edited delivery".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         history["turns"].as_array_mut().unwrap().push(serde_json::json!({"id":"other-turn","items":[{"type":"subAgentActivity","id":"other","agentThreadId":"outsider","agentPath":"/root/outsider","kind":"started"}]}));
         let saved = reconcile_agents(&task, &history).unwrap();
@@ -1285,3 +1282,15 @@ mod tests {
         assert!(read_message(&mut std::io::Cursor::new(vec![b'x'; MAX_MESSAGE + 2])).is_err());
     }
 }
+
+pub fn writing_thread(task:&Task,mut request:Value)->Value{
+ if let Some(w)=&task.code_workspace{
+  request["params"]["cwd"]=serde_json::json!(w.directory);
+  request["params"]["sandbox"]=serde_json::json!("workspace-write");
+  request["params"]["config"]=serde_json::json!({"sandbox_workspace_write.writable_roots":[w.directory],"sandbox_workspace_write.network_access":false,"sandbox_workspace_write.exclude_slash_tmp":true,"sandbox_workspace_write.exclude_tmpdir_env_var":true,"mcp_servers":{}});
+  request["params"]["developerInstructions"]=serde_json::json!("只允许修改本任务分配的独立工作区。不得修改共享 Git 元数据、原项目目录、访问网络或调用外部写服务；Git 快照、集成与合并由平台管理。所有分工由工作台组织，不另行创建写入子会话。普通说明留在对话，成果按任务提交协议。权限提升必须拒绝。");
+ }request
+}
+pub fn writing_turn(task:&Task,mut request:Value)->Value{if let Some(w)=&task.code_workspace{request["params"]["cwd"]=serde_json::json!(w.directory);request["params"]["sandboxPolicy"]=serde_json::json!({"type":"workspaceWrite","writableRoots":[w.directory],"networkAccess":false,"excludeSlashTmp":true,"excludeTmpdirEnvVar":true});}request}
+pub fn validate_writing_response(task:&Task,result:&Value)->Result<(),String>{if let Some(w)=&task.code_workspace{let s=&result["sandbox"];if result["cwd"]!=w.directory||s["type"]!="workspaceWrite"||s["writableRoots"]!=serde_json::json!([w.directory])||s["networkAccess"]!=false||s["excludeSlashTmp"]!=true||s["excludeTmpdirEnvVar"]!=true{return Err("CLI 未确认受限工作区沙箱，已拒绝写任务启动".into())}}Ok(())}
+pub fn empty_mcp(result:&Value)->bool{result["data"].as_array().is_some_and(|a|a.is_empty())&&result.get("nextCursor").is_some_and(Value::is_null)}

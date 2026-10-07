@@ -7,9 +7,10 @@ export function chatTimeline(task:Task):ChatEntry[]{
   const inputs=(task.supplements||[]).map(s=>({runId:s.runId,entry:{id:`input:${s.runId}`,at:s.createdAt,text:s.text,status:s.sourceThreadId?'原会话被占用 · 已复制历史到续接分支':''}}));
   const directions=(task.directions||[]).map(d=>({runId:d.runId,entry:{id:`direction:${d.id}`,at:d.createdAt,text:d.text,status:({pending:'等待执行器确认',accepted:'执行器已确认 · 请在交付中核对采用情况',rejected:'执行器已拒绝',unknown:'确认未知 · 请勿重复发送'})[d.status]}}));
   const documents=task.artifacts.map(artifact=>{
-    const runId=runs.find(run=>artifact.id===`${run}-result`);
+    const receipt=task.deliverySubmissions?.find(r=>r.artifactIds.includes(artifact.id));
+    const runId=receipt?.runId||runs.find(run=>artifact.id===`${run}-result`);
     const final=messages.filter(m=>m.runId===runId&&m.kind==='assistant'&&m.finalAnswer&&m.status==='completed');
-    const documentOnly=final.length>0&&final.every(m=>!m.truncated&&!!m.text)&&final.map(m=>m.text).join('\n\n---\n\n')===artifact.content;
+    const documentOnly=!!receipt||artifact.kind!=='markdown'||final.length>0&&final.every(m=>!m.truncated&&!!m.text)&&final.map(m=>m.text).join('\n\n---\n\n')===artifact.content;
     return {runId,entry:{id:`artifact:${artifact.id}`,at:artifact.createdAt,text:'',artifact,documentOnly}};
   });
   const extras=[...inputs,...directions,...documents];

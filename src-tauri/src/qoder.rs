@@ -1,6 +1,6 @@
 use crate::{
     executor::{Capabilities, Descriptor, Doctor, Executor, SessionRef},
-    model::{now, Artifact, Task, OUTPUT_LIMIT},
+    model::{now, Task, OUTPUT_LIMIT},
     process::{send, OwnedChild},
     protocol::{error_message, read_message},
     store::Store,
@@ -100,6 +100,7 @@ impl AcpSession {
             match update["sessionUpdate"].as_str() {
                 Some("agent_message_chunk") if update["content"]["type"] == "text" => {
                     if let Some(text) = update["content"]["text"].as_str() {
+                        task.confirm_source_input();
                         let remaining = OUTPUT_LIMIT.saturating_sub(self.output.chars().count());
                         self.output.extend(text.chars().take(remaining));
                         if text.chars().count() > remaining {
@@ -108,10 +109,12 @@ impl AcpSession {
                             }
                         }
                         task.collect_answer("qoder-response", &self.output);
+                        crate::conversation::qoder_output(task,&self.output,false,task.nodes.first().is_some_and(|n|n.output_truncated));
                         task.event("收到执行器文本输出", "output", "Qoder");
                     }
                 }
                 Some("tool_call" | "tool_call_update") => {
+                    task.confirm_source_input();
                     let title = update["title"].as_str().unwrap_or("工具状态更新");
                     task.event(
                         &format!(
@@ -206,11 +209,7 @@ impl AcpSession {
                     .ok_or("Qoder 会话未创建")?
                     .id
                     .clone();
-                let text = if self.resume {
-                    task.supplements.last().ok_or("补充记录缺失")?.text.clone()
-                } else {
-                    task.prompt.clone()
-                };
+                let text=task.output_instruction(&task.execution_input());
                 // ACP has no turn ID: this token identifies only our prompt request.
                 task.turn_id = Some(format!(
                     "{}:3",
@@ -228,6 +227,7 @@ impl AcpSession {
                 let reason = result["stopReason"]
                     .as_str()
                     .ok_or("Qoder 未返回有效停止原因")?;
+                task.confirm_source_input();
                 task.status = match reason {
                     "end_turn" => "completed",
                     "cancelled" => "interrupted",
@@ -249,24 +249,10 @@ impl AcpSession {
                     node.status = task.status.clone();
                     node.summary = format!("本轮结束：{reason}");
                 }
-                if reason == "end_turn" && !self.output.trim().is_empty() {
-                    let content = task
-                        .nodes
-                        .first()
-                        .map(|n| n.output.clone())
-                        .unwrap_or_default();
-                    let version = task.artifacts.len() + 1;
-                    task.artifacts.push(Artifact {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: if version == 1 {
-                            "qoder-result.md".into()
-                        } else {
-                            format!("qoder-result-v{version}.md")
-                        },
-                        kind: "markdown".into(),
-                        content,
-                        created_at: now(),
-                    });
+                if reason=="end_turn" {
+                    crate::conversation::qoder_output(task,&self.output,true,task.nodes.first().is_some_and(|n|n.output_truncated));
+                    task.delivery_candidate.capture("qoder-response",&self.output);
+                    if task.nodes.first().is_some_and(|n|n.output_truncated){task.delivery_candidate.truncated=true;}
                 }
                 self.phase = Phase::Ended;
                 Ok(vec![])
@@ -569,16 +555,19 @@ fn write_messages(
 }
 #[derive(Clone)]
 pub struct QoderExecutor {
+    starting:Arc<Mutex<bool>>,
     store: Arc<Store>,
     runs: Arc<Mutex<HashMap<String, Arc<Mutex<Run>>>>>,
 }
 impl QoderExecutor {
     pub fn new(store: Arc<Store>) -> Self {
         Self {
+            starting:Arc::new(Mutex::new(false)),
             store,
             runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    fn begin_start(&self)->Result<std::sync::MutexGuard<'_,bool>,String>{let g=self.starting.lock().unwrap();if *g{Err("工作台正在关闭，不能启动 Qoder".into())}else{Ok(g)}}
     fn publish(&self, app: &AppHandle, task: Task) -> Result<(), String> {
         match self.store.save_existing_task(task)? {
             Some(saved) => {
@@ -687,6 +676,13 @@ impl Executor for QoderExecutor {
         }
         Ok(())
     }
+    fn ownership(&self)->Vec<crate::executor::Ownership>{
+        self.runs.lock().unwrap().values().filter_map(|run|{let r=run.lock().unwrap();(!r.closed||!r.child.stopped).then(||crate::executor::Ownership{task_id:r.task.id.clone(),run_id:r.task.run_id.clone().unwrap(),session_id:r.task.session_ref.as_ref().map(|s|s.id.clone())})}).collect()
+    }
+    fn abort_start(&self,app:AppHandle,id:String)->Result<(),String>{
+        let run=self.runs.lock().unwrap().get(&id).cloned().ok_or("运行不存在")?;
+        self.fail(&app,&run,"启动已取消","interrupted");let mut r=run.lock().unwrap();r.child.stop()
+    }
     fn ensure_task_idle(&self, task_id: &str) -> Result<(), String> {
         for run in self.runs.lock().unwrap().values() {
             let r = run.lock().unwrap();
@@ -702,6 +698,7 @@ impl Executor for QoderExecutor {
         mut task: Task,
         resume_anchor: Option<String>,
     ) -> Result<Task, String> {
+        let handoff=self.begin_start()?;
         let resume = resume_anchor.is_some();
         let cwd = match self.working_directory(&task, resume) {
             Ok(cwd) => cwd,
@@ -764,9 +761,10 @@ impl Executor for QoderExecutor {
         });
         {
             let mut runs = self.runs.lock().unwrap();
-            runs.retain(|_, run| !run.lock().unwrap().closed);
+            runs.retain(|_, run| {let r=run.lock().unwrap();!r.closed||!r.child.stopped});
             runs.insert(task.run_id.clone().unwrap(), run.clone());
         }
+        drop(handoff);
         let _ = app.emit("runtime-task", task.clone());
         if queue(&run.lock().unwrap().input, initialize()).is_err() {
             self.fail(&app, &run, "Qoder 初始化发送失败", "failed");
@@ -919,9 +917,10 @@ impl Executor for QoderExecutor {
         self.runs
             .lock()
             .unwrap()
-            .retain(|_, r| r.lock().unwrap().task.id != task_id);
+            .retain(|_, r| {let r=r.lock().unwrap();r.task.id != task_id||!r.closed||!r.child.stopped});
     }
     fn shutdown(&self) {
+        let mut gate=self.starting.lock().unwrap();*gate=true;
         for run in self.runs.lock().unwrap().values() {
             let mut r = run.lock().unwrap();
             if !r.closed {
@@ -948,6 +947,24 @@ mod tests {
         task
     }
     #[test]
+    fn source_receipt_requires_remote_prompt_response_not_local_request_token() {
+        use crate::{sources::SourceInput,store::Store};
+        let dir=std::env::temp_dir().join(format!("orbit-qoder-source-{}",uuid::Uuid::new_v4()));
+        let store=Store::open(dir.clone()).unwrap();let mut task=task();
+        task.source_inputs.push(SourceInput::new(task.run_id.clone().unwrap(),"initial",task.prompt.clone(),vec![],task.run_id.clone(),None));store.save_task(task.clone()).unwrap();
+        let mut state=AcpSession::new(false);let cwd=std::path::Path::new("/tmp/task");
+        state.receive(&mut task,&json!({"id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),cwd).unwrap();
+        let requests=state.receive(&mut task,&json!({"id":2,"result":{"sessionId":"s"}}),cwd).unwrap();
+        assert_eq!(requests[0]["params"]["prompt"][0]["text"],crate::delivery::instruction(&task.execution_input()));
+        assert!(task.turn_id.is_some());let pending=store.save_existing_task(task.clone()).unwrap().unwrap();assert_eq!(pending.source_inputs[0].status,"pending");
+        let mut failed=task.clone();failed.status="unknown".into();failed.event("write failed","error","fixture");let unknown=store.save_existing_task(failed).unwrap().unwrap();assert_eq!(unknown.source_inputs[0].status,"unknown");
+        state.receive(&mut task,&json!({"method":"session/update","params":{"sessionId":"foreign","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"wrong"}}}}),cwd).unwrap();assert_eq!(task.source_inputs[0].status,"pending");
+        task.revision=unknown.executor_revision.unwrap();
+        state.receive(&mut task,&json!({"id":3,"result":{"stopReason":"end_turn"}}),cwd).unwrap();
+        let accepted=store.save_existing_task(task).unwrap().unwrap();assert_eq!(accepted.source_inputs[0].status,"accepted");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn acp_handshake_session_and_foreign_events() {
         let mut task = task();
         let mut state = AcpSession::new(false);
@@ -961,7 +978,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(requests[0]["method"], "session/prompt");
-        assert_eq!(requests[0]["params"]["prompt"][0]["text"], "original");
+        assert_eq!(requests[0]["params"]["prompt"][0]["text"], crate::delivery::instruction("original"));
         assert!(task.can_resume());
         state.receive(&mut task,&json!({"method":"session/update","params":{"sessionId":"foreign","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"wrong"}}}}),std::path::Path::new("/tmp/task")).unwrap();
         assert!(task.nodes[0].output.is_empty());
@@ -974,8 +991,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(task.status, "completed");
-        assert_eq!(task.artifacts[0].content, "answer");
-        assert_eq!(task.artifacts[0].name, "qoder-result.md");
+        assert!(task.artifacts.is_empty());
+        assert_eq!(task.conversation[0].text,"answer");
+        assert_eq!(task.conversation[0].status,"completed");
     }
     #[test]
     fn acp_resume_rechecks_capability_and_does_not_copy_replayed_text() {
@@ -1010,7 +1028,7 @@ mod tests {
                 std::path::Path::new("/tmp/original"),
             )
             .unwrap();
-        assert_eq!(requests[0]["params"]["prompt"][0]["text"], "follow up");
+        assert_eq!(requests[0]["params"]["prompt"][0]["text"], crate::delivery::instruction("follow up"));
         assert!(task.nodes[0].output.is_empty());
     }
     #[test]
@@ -1304,7 +1322,7 @@ mod tests {
                 let before = task.revision;
                 let requests = state.receive(&mut task, &message, &cwd).unwrap();
                 if before != task.revision {
-                    store.save_existing_task(task.clone()).unwrap().unwrap();
+                    let saved=store.save_existing_task(task.clone()).unwrap().unwrap();task.merge_platform(&saved);
                 }
                 for request in requests {
                     send(&mut input, &request).unwrap();
@@ -1313,6 +1331,7 @@ mod tests {
             child.stop().unwrap();
             drop(rx);
             reader.join().unwrap();
+            task=store.task(&task.id).unwrap();
         }
         assert_eq!(task.artifacts.len(), 2);
         assert_eq!(task.artifacts[0].content, "FIRST");
@@ -1420,4 +1439,11 @@ mod catalog_supervisor_tests {
         assert!(state.trim().is_empty()||state.trim().starts_with('Z'),"descendant still alive: {state}");
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+#[cfg(all(test,unix))]
+mod shutdown_handoff_test{
+ use super::*;use std::os::unix::process::CommandExt;
+ #[test]fn closing_waits_for_spawn_registration_and_refuses_later_starts(){
+  let dir=std::env::temp_dir().join(format!("orbit-qoder-shutdown-{}",uuid::Uuid::new_v4()));let r=QoderExecutor::new(Arc::new(Store::open(dir.clone()).unwrap()));let gate=r.begin_start().unwrap();let child=OwnedChild::new(Command::new("/bin/sh").args(["-c","sleep 30"]).process_group(0).spawn().unwrap());let task=Task::new("test".into(),"goal".into(),"research".into());let id=task.run_id.clone().unwrap();let(tx,_rx)=mpsc::sync_channel(1);let run=Arc::new(Mutex::new(Run{task,child,input:tx,writer_closed:Arc::new(AtomicBool::new(false)),state:AcpSession::new(false),closed:false}));r.runs.lock().unwrap().insert(id,run.clone());let(done,finished)=mpsc::channel();let other=r.clone();let worker=thread::spawn(move||{other.shutdown();done.send(()).unwrap();});assert!(finished.recv_timeout(Duration::from_millis(50)).is_err());drop(gate);finished.recv_timeout(Duration::from_secs(5)).unwrap();worker.join().unwrap();assert!(run.lock().unwrap().child.stopped);assert!(r.begin_start().is_err());std::fs::remove_dir_all(dir).unwrap();
+ }
 }

@@ -99,6 +99,8 @@ pub struct Approval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artifact {
+    #[serde(default)]
+    pub source_input_ids: Vec<String>,
     pub id: String,
     pub name: String,
     pub kind: String,
@@ -140,6 +142,7 @@ pub enum QueueAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueRequest {
+    #[serde(default)] pub cancel_requested:bool,
     pub request_id: String, pub order: u64, pub next_run_id: String,
     pub state: String, pub action: QueueAction, pub error: Option<String>,
 }
@@ -149,6 +152,22 @@ pub struct Acceptance { pub run_id: Option<String>, pub turn_id: Option<String>,
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    #[serde(default)] pub assignment:Option<crate::team::AgentProfile>,
+    #[serde(default)] pub team:Option<crate::team::TeamWorkflow>,
+    #[serde(default)] pub parent_link:Option<crate::team::ParentLink>,
+    #[serde(default)] pub team_input:Option<crate::team::ExecutionInput>,
+    #[serde(default)] pub review_submission:Option<crate::team::ReviewReceipt>,
+    #[serde(default)] pub code_workspace:Option<crate::team::CodeWorkspace>,
+    #[serde(default)]
+    pub source_inputs: Vec<crate::sources::SourceInput>,
+    #[serde(default)]
+    pub explicit_delivery: bool,
+    #[serde(default)]
+    pub delivery_submissions: Vec<crate::delivery::Receipt>,
+    #[serde(default)]
+    pub delivery_error: Option<String>,
+    #[serde(skip)]
+    pub delivery_candidate: crate::delivery::Candidate,
     #[serde(default)]
     pub queue: Option<QueueRequest>,
     #[serde(default)]
@@ -199,7 +218,8 @@ pub struct Task {
 impl Task {
     pub fn new(title: String, prompt: String, scene: String) -> Self {
         Self {
-            queue: None, acceptance: None,
+            assignment:None,team:None,parent_link:None,team_input:None,review_submission:None,code_workspace:None,
+            queue: None, acceptance: None, source_inputs: vec![], explicit_delivery:false, delivery_submissions:vec![], delivery_candidate:Default::default(), delivery_error:None,
             conversation: vec![], conversation_truncated: false,
             id: uuid::Uuid::new_v4().to_string(),
             title,
@@ -232,6 +252,8 @@ impl Task {
         }
     }
     pub fn begin_run(&mut self, preserve: bool) {
+        self.explicit_delivery=true;self.delivery_candidate=Default::default();self.delivery_error=None;self.review_submission=None;
+        if let Some(w)=self.code_workspace.as_mut(){w.snapshot=None;w.artifact_id=None;}
         self.acceptance = None;
         self.status = "running".into();
         self.started_at = Some(now());
@@ -250,6 +272,7 @@ impl Task {
             self.thread_id = None;
             self.session_ref = None;
             self.artifacts.clear();
+            self.delivery_submissions.clear();
             self.supplements.clear();
             self.directions.clear();
         }
@@ -307,6 +330,9 @@ impl Task {
     // Platform bookkeeping must not import the UI clock into the actor's execution clock.
     pub fn merge_platform(&mut self, saved: &Self) {
         if self.id != saved.id || self.run_id != saved.run_id || self.provider != saved.provider { return; }
+        self.assignment=saved.assignment.clone();self.team=saved.team.clone();self.parent_link=saved.parent_link.clone();self.team_input=saved.team_input.clone();self.review_submission=saved.review_submission.clone();self.code_workspace=saved.code_workspace.clone();
+        self.source_inputs=saved.source_inputs.clone();
+        self.delivery_submissions=saved.delivery_submissions.clone();self.explicit_delivery=saved.explicit_delivery;self.delivery_error=saved.delivery_error.clone();
         self.queue=saved.queue.clone();self.acceptance=saved.acceptance.clone();self.archived=saved.archived;
         if self.terminal() && saved.terminal() && self.turn_id==saved.turn_id {
             self.artifacts=saved.artifacts.clone();
@@ -315,10 +341,30 @@ impl Task {
     pub fn actor_snapshot(mut self) -> Self {
         self.revision=self.executor_revision.unwrap_or(self.revision);self
     }
+    pub fn execution_input(&self)->String {
+        let text=if let Some(input)=self.source_inputs.iter().find(|i|i.run_id==self.run_id && matches!(i.kind.as_str(),"initial"|"continue")){input.render()}else{self.supplements.last().filter(|s|Some(&s.run_id)==self.run_id.as_ref()).map(|s|s.text.clone()).unwrap_or_else(||self.prompt.clone())};
+        let role=self.assignment.as_ref().map(|a|format!("Agent：{}\n职责：{}\n\n",a.name,a.role)).unwrap_or_default();
+        format!("{role}{text}{}",self.team_input.as_ref().map(|i|format!("\n\n{}",i.render())).unwrap_or_default())
+    }
+    pub fn output_instruction(&self,input:&str)->String {
+        if self.parent_link.as_ref().is_some_and(|p|p.role=="review") {crate::team::review_instruction(input,self.team_input.as_ref().map(|i|i.version.as_str()).unwrap_or(""))}else{let text=crate::delivery::instruction(input);if self.code_workspace.is_some(){text.replace("当前只读执行权限不变。","仅允许修改分配的独立工作区。Git 元数据由平台管理，不提交或合并；代码交付由平台保存真实变更快照。") }else{text}}
+    }
+    pub fn provided_input_ids(&self)->Vec<String> {
+        let from=self.source_inputs.iter().rposition(|i|i.kind=="initial").unwrap_or(0);
+        self.source_inputs[from..].iter().filter(|i|!i.sources.is_empty() && i.kind!="template" && matches!(i.status.as_str(),"accepted"|"unknown")).map(|i|i.id.clone()).collect()
+    }
+    pub fn confirm_source_input(&mut self) {
+        for input in &mut self.source_inputs {
+            if input.run_id==self.run_id && matches!(input.kind.as_str(),"initial"|"continue") {input.status="accepted".into();input.turn_id=self.turn_id.clone();}
+        }
+    }
+    pub fn current_delivery_ids(&self)->Vec<String> {
+        if !self.explicit_delivery {return self.artifacts.iter().filter(|a|!self.delivery_submissions.iter().any(|r|r.origin=="manual"&&r.artifact_ids.contains(&a.id))).map(|a|a.id.clone()).collect()}
+        self.delivery_submissions.iter().filter(|r|(r.origin=="executor"||(r.origin=="workspace"&&self.code_workspace.as_ref().and_then(|w|w.artifact_id.as_ref()).is_some_and(|id|r.artifact_ids.contains(id))))&&Some(&r.run_id)==self.run_id.as_ref()&&r.turn_id==self.turn_id).flat_map(|r|r.artifact_ids.clone()).collect()
+    }
     pub fn accepted(&self) -> bool {
-        self.status == "completed" && !self.artifacts.is_empty() && self.acceptance.as_ref().is_some_and(|a|
-            a.run_id == self.run_id && a.turn_id == self.turn_id &&
-            a.artifact_ids == self.artifacts.iter().map(|a| a.id.clone()).collect::<Vec<_>>())
+        self.team.as_ref().is_none_or(|w|w.phase=="ready"&&!w.cancelled&&w.review.as_ref().is_some_and(|r|r.packet.verdict=="pass")) && self.status == "completed" && !self.current_delivery_ids().is_empty() && self.acceptance.as_ref().is_some_and(|a|
+            a.run_id == self.run_id && a.turn_id == self.turn_id && a.artifact_ids == self.current_delivery_ids())
     }
     pub fn terminal(&self) -> bool {
         matches!(self.status.as_str(), "completed" | "failed" | "interrupted")
@@ -354,6 +400,10 @@ impl Task {
             if direction.status == "pending" {
                 direction.status = "unknown".into();
             }
+        }
+        for input in &mut self.source_inputs {
+            if input.kind=="direction" {if let Some(d)=self.directions.iter().find(|d|d.id==input.id){input.status=d.status.clone();}}
+            else if input.status=="pending" && input.run_id.is_some() && input.run_id==self.run_id {input.status="unknown".into();}
         }
     }
     pub fn collect_answer(&mut self, id: &str, value: &str) {
@@ -510,7 +560,7 @@ mod continuation_tests {
             name: "first.md".into(),
             kind: "markdown".into(),
             content: "edited delivery".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         let run = task.run_id.clone();
         assert!(task
@@ -559,7 +609,7 @@ mod platform_merge_tests {
     fn platform_refresh_preserves_actor_clock_and_completed_output() {
         let mut actor=Task::new("x".into(),"goal".into(),"research".into());actor.turn_id=Some("turn".into());
         let mut platform=actor.clone();platform.revision+=10;
-        actor.status="completed".into();actor.artifacts.push(Artifact{id:"fresh".into(),name:"new.md".into(),kind:"markdown".into(),content:"fresh".into(),created_at:0});actor.event("completed","system","agent");
+        actor.status="completed".into();actor.artifacts.push(Artifact{id:"fresh".into(),name:"new.md".into(),kind:"markdown".into(),content:"fresh".into(),source_input_ids: vec![], created_at:0});actor.event("completed","system","agent");
         let clock=actor.revision;actor.merge_platform(&platform);assert_eq!(actor.status,"completed");assert_eq!(actor.revision,clock);assert_eq!(actor.artifacts[0].content,"fresh");
         platform.status="completed".into();platform.turn_id=Some("other".into());actor.merge_platform(&platform);assert_eq!(actor.artifacts[0].content,"fresh");
         platform.turn_id=actor.turn_id.clone();platform.artifacts=actor.artifacts.clone();platform.artifacts[0].content="user edit".into();actor.merge_platform(&platform);assert_eq!(actor.artifacts[0].content,"user edit");assert_eq!(actor.revision,clock);

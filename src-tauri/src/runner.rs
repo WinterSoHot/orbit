@@ -45,6 +45,7 @@ struct Run {
     startup: Startup,
     buffered: Vec<Value>,
     buffered_bytes: usize,
+    writing_turn:Option<Value>,
 }
 
 impl Run {
@@ -58,10 +59,10 @@ impl Run {
     }
     fn thread_request(&mut self, directory: &std::path::Path, model: &str) -> Value {
         self.requested_model = Some(model.into());
-        match &self.resume_turn {
+        let request=match &self.resume_turn {
             Some(_) => resume_request(self.task.thread_id.as_deref().unwrap(), model),
             None => thread_request(directory, model),
-        }
+        };crate::protocol::writing_thread(&self.task,request)
     }
     fn recover_writer(&mut self, id: u64, detail: &str) -> Option<Value> {
         let source = self.task.thread_id.as_deref()?;
@@ -103,6 +104,7 @@ impl Run {
             source,
             self.requested_model.as_deref().ok_or("请求模型缺失")?,
         );
+        request=crate::protocol::writing_thread(&self.task,request);
         request["id"] = json!(6);
         request["method"] = json!("thread/fork");
         request["params"]["lastTurnId"] = json!(anchor);
@@ -115,6 +117,7 @@ impl Run {
         Ok(request)
     }
     fn prepare_turn(&self, result: &Value, fork: bool) -> Result<(Task, Value), String> {
+        crate::protocol::validate_writing_response(&self.task,result)?;
         let thread = &result["thread"];
         let id = thread["id"]
             .as_str()
@@ -151,12 +154,10 @@ impl Run {
         task.thread_id = Some(id.into());
         task.root_node();
         task.nodes[0].model = result["model"].as_str().unwrap_or("实际模型未返回").into();
-        let text = if self.resume_turn.is_some() {
-            &task.supplements.last().ok_or("补充记录缺失")?.text
-        } else {
-            &task.prompt
-        };
-        let request = turn_request(id, text);
+        let text=task.execution_input();
+        let mut request = turn_request(id, &text);
+        request["params"]["input"][0]["text"]=serde_json::json!(self.task.output_instruction(&text));
+        request=crate::protocol::writing_turn(&task,request);
         task.event(
             if fork {
                 "续接分支已保存，发送补充信息"
@@ -221,7 +222,9 @@ impl Run {
         self.buffered.push(message.clone());
         Ok(true)
     }
-    fn direction_request(&self, text: &str) -> Result<(Task, Value), String> {
+    fn direction_request(&self,text:&str)->Result<(Task,Value),String>{self.direction_with_sources(text,vec![])}
+    fn direction_with_sources(&self, text:&str, sources:Vec<crate::sources::SourceSnapshot>)->Result<(Task,Value),String>{
+        crate::sources::validate_sources(&sources)?;
         if text.trim().is_empty() || text.chars().count() > 2000 {
             return Err("补充方向应为 1–2000 字".into());
         }
@@ -254,10 +257,12 @@ impl Run {
             created_at: now(),
         });
         task.event("补充正文已保存，等待执行器确认", "input", "你");
-        let input = format!(
-            "请结合本轮原始目标处理以下补充，并在最终交付中体现：\n{}",
-            text.trim()
-        );
+        let rendered=if sources.is_empty(){text.trim().into()}else{
+            let direction=task.directions.last().unwrap();
+            let input=crate::sources::SourceInput::new(direction.id.clone(),"direction",direction.text.clone(),sources,task.run_id.clone(),Some(turn.into()));
+            let rendered=input.render();task.source_inputs.push(input);rendered
+        };
+        let input=format!("请结合本轮原始目标处理以下补充，并在最终交付中体现：\n{}",rendered);
         Ok((
             task,
             json!({"id":self.next_id,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":input}]}}),
@@ -431,7 +436,7 @@ mod tests {
         let store = Store::open(directory.clone()).unwrap();
         let mut task = Task::new(
             "Continuation verification".into(),
-            "Reply exactly FIRST_OK. Do not use tools or spawn agents.".into(),
+            "Submit a Markdown delivery named result.md with exact content FIRST_OK using the Orbit delivery contract. Do not use tools or spawn agents.".into(),
             "writing".into(),
         );
         for round in 0..2 {
@@ -444,7 +449,7 @@ mod tests {
                         task.revision,
                         &task.run_id,
                         &task.turn_id,
-                        "Reply exactly SECOND_OK. Do not use tools or spawn agents.",
+                        "Submit a Markdown delivery named result.md with exact content SECOND_OK using the Orbit delivery contract. Do not use tools or spawn agents.",
                     )
                     .unwrap();
                 assert_eq!(next.thread_id, original_thread);
@@ -489,6 +494,7 @@ mod tests {
                 startup: Startup::Connecting,
                 buffered: Vec::new(),
                 buffered_bytes: 0,
+            writing_turn:None,
             };
             send(&mut run.input, &initialize()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -547,6 +553,7 @@ mod tests {
                 }
             }
             assert_eq!(run.task.status, "completed");
+            let saved=store.save_existing_task(run.task.clone()).unwrap().unwrap();run.task.merge_platform(&saved);
             let expected = if round == 0 { "FIRST_OK" } else { "SECOND_OK" };
             assert_eq!(run.task.artifacts.last().unwrap().content.trim(), expected);
             if occupied && round == 0 {
@@ -555,8 +562,7 @@ mod tests {
             } else {
                 run.child.stop().unwrap();
             }
-            task = run.task;
-            store.save_existing_task(task.clone()).unwrap().unwrap();
+            task = store.task(&run.task.id).unwrap();
         }
         if occupied {
             assert_eq!(
@@ -631,7 +637,7 @@ mod tests {
             name: "v1.md".into(),
             kind: "markdown".into(),
             content: "edited first".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         let (next, anchor) = run
             .task
@@ -657,7 +663,7 @@ mod tests {
         assert!(run.start_turn(&json!({"thread":{"id":"thread","status":{"type":"active"},"turns":[{"id":"turn","status":"completed"}]}})).is_err());
         assert!(run.start_turn(&json!({"thread":{"id":"thread","status":{"type":"idle"},"turns":[{"id":"newer","status":"failed"}]}})).is_err());
         let request=run.start_turn(&json!({"model":"default","thread":{"id":"thread","status":{"type":"idle"},"turns":[{"id":"turn","status":"completed"}]}})).unwrap();
-        assert_eq!(request["params"]["input"][0]["text"], "next question");
+        assert_eq!(request["params"]["input"][0]["text"], crate::delivery::instruction("next question"));
         assert_eq!(request["params"]["sandboxPolicy"]["type"], "readOnly");
         assert!(run.defer_notification(&old).unwrap());
         let early = json!({"method":"item/completed","params":{"threadId":"thread","turnId":"second","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"second result"}}});
@@ -671,10 +677,10 @@ mod tests {
             &mut run.task,
             &json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"second","status":"completed"}}}),
         );
-        assert_eq!(run.task.artifacts.len(), 2);
+        assert_eq!(run.task.artifacts.len(), 1);
         assert_eq!(run.task.artifacts[0].content, "edited first");
-        assert_eq!(run.task.artifacts[1].content, "second result");
-        assert_eq!(run.task.artifacts[1].name, "codex-result-v2.md");
+        assert_eq!(run.task.conversation.last().unwrap().text,"second result");
+        assert_eq!(run.task.delivery_candidate.text,"second result");
     }
     #[test]
     #[cfg(unix)]
@@ -699,7 +705,7 @@ mod tests {
             name: "doc.md".into(),
             kind: "markdown".into(),
             content: "original".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         runtime.store.save_task(run.task.clone()).unwrap();
         let run = Arc::new(Mutex::new(run));
@@ -740,7 +746,7 @@ mod tests {
             name: "doc.md".into(),
             kind: "markdown".into(),
             content: "delivery".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         let id = run.task.id.clone();
         runtime.store.save_task(run.task.clone()).unwrap();
@@ -841,6 +847,7 @@ mod tests {
             startup: Startup::Running,
             buffered: Vec::new(),
             buffered_bytes: 0,
+            writing_turn:None,
         }
     }
     #[test]
@@ -856,7 +863,7 @@ mod tests {
             name: "old.md".into(),
             kind: "markdown".into(),
             content: "edited first".into(),
-            created_at: 0,
+            source_input_ids: vec![], created_at: 0,
         });
         let (task, anchor) = run
             .task
@@ -1140,6 +1147,7 @@ mod tests {
         let lifecycle = runtime.begin_start().unwrap();
         assert!(runtime.ensure_idle().is_err());
         assert_eq!(runtime.inspections.lock().unwrap().len(), 1);
+        assert!(<Runtime as Executor>::ensure_task_idle(&runtime,"independent").unwrap_err().contains("清理未确认"));
         drop(lifecycle);
         assert!(runtime
             .sync_agents("missing".into())
@@ -1434,8 +1442,10 @@ fn cli_path() -> PathBuf {
     }
     PathBuf::from("codex")
 }
-fn command() -> Command {
+fn command() -> Command {command_with_mode(false)}
+fn command_with_mode(writing:bool)->Command {
     let mut c = Command::new(cli_path());
+    if writing{c.arg("-c").arg("mcp_servers={}");}
     c.arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1681,7 +1691,7 @@ impl Runtime {
     }
     pub fn sync_agents(&self, task_id: String) -> Result<Task, String> {
         let _lifecycle = self.begin_start()?;
-        self.ensure_idle()?;
+        <Self as Executor>::ensure_task_idle(self,&task_id)?;
         let task = self.store.task(&task_id).ok_or("真实任务不存在")?;
         if task.archived {
             return Err("归档任务只读，不能同步协作".into());
@@ -1775,10 +1785,10 @@ impl Runtime {
             }
         }
         self.store.delete_task(&task_id)?;
-        runs.retain(|_, r| r.lock().unwrap().task.id != task_id);
+        runs.retain(|_, r| {let r=r.lock().unwrap();r.task.id != task_id||!r.idle()});
         Ok(())
     }
-    fn ensure_idle(&self) -> Result<(), String> {
+    fn ensure_inspections_clean(&self) -> Result<(), String> {
         {
             let mut inspections = self.inspections.lock().unwrap();
             for child in inspections.iter_mut() {
@@ -1789,6 +1799,10 @@ impl Runtime {
                 return Err("协作记录进程清理未确认，请核对本机进程后重启工作台".into());
             }
         }
+        Ok(())
+    }
+    fn ensure_idle(&self) -> Result<(), String> {
+        self.ensure_inspections_clean()?;
         for run in self.runs.lock().unwrap().values() {
             let mut r = run.lock().unwrap();
             if !r.closed {
@@ -1825,12 +1839,14 @@ impl Runtime {
         task: Task,
         resume_turn: Option<String>,
     ) -> Result<Task, String> {
+        let handoff=self.begin_start()?;
         let run_id = task.run_id.clone().unwrap();
-        let directory = self.store.directory.join("runs").join(&run_id);
+        let directory = task.code_workspace.as_ref().map(|w|PathBuf::from(&w.directory)).unwrap_or_else(||self.store.directory.join("runs").join(&run_id));
         if std::fs::create_dir_all(&directory).is_err() {
             return Ok(self.fail_unlaunched(&app, task, "无法创建任务目录；已有交付保留"));
         }
-        let child = match command().current_dir(&directory).spawn() {
+        let mut launch_command=command_with_mode(task.code_workspace.is_some());
+        let child = match launch_command.current_dir(&directory).spawn() {
             Ok(child) => child,
             Err(_) => {
                 return Ok(self.fail_unlaunched(
@@ -1863,12 +1879,14 @@ impl Runtime {
             startup: Startup::Connecting,
             buffered: Vec::new(),
             buffered_bytes: 0,
+            writing_turn:None,
         }));
         {
             let mut runs = self.runs.lock().unwrap();
-            runs.retain(|_, r| !r.lock().unwrap().closed);
+            runs.retain(|_, r| !r.lock().unwrap().idle());
             runs.insert(run_id.clone(), run.clone());
         }
+        drop(handoff);
         let _ = app.emit("runtime-task", task.clone());
         let sent = {
             let mut r = run.lock().unwrap();
@@ -2098,7 +2116,13 @@ impl Runtime {
                         self.fail(app, run, "初始化通知发送失败", "failed");
                         return false;
                     }
-                    Some(r.initialized_model_request(directory))
+                    if r.task.code_workspace.is_some(){Some(json!({"id":88,"method":"mcpServerStatus/list","params":{"limit":100}}))}else{Some(r.initialized_model_request(directory))}
+                }
+                88 if r.task.code_workspace.is_some() && r.startup==Startup::Connecting=>{
+                    if !crate::protocol::empty_mcp(&message["result"]){drop(r);self.fail(app,run,"无法确认 MCP 完全关闭，未启动写任务","failed");return false;}Some(r.initialized_model_request(directory))
+                }
+                89 if r.task.code_workspace.is_some() && r.startup==Startup::AwaitingTurn=>{
+                    if !crate::protocol::empty_mcp(&message["result"]){drop(r);self.fail(app,run,"写任务会话仍含 MCP 或查询不完整，未发送任务","failed");return false;}r.writing_turn.take()
                 }
                 4 if r.startup == Startup::Connecting && r.requested_model.is_none() => {
                     match select_model(&message["result"], &mut r.model_cursors) {
@@ -2125,7 +2149,7 @@ impl Runtime {
                     match r.start_turn(&message["result"]) {
                         Ok(request) => {
                             changed = true;
-                            Some(request)
+                            if r.task.code_workspace.is_some(){r.writing_turn=Some(request);Some(json!({"id":89,"method":"mcpServerStatus/list","params":{"limit":100}}))}else{Some(request)}
                         }
                         Err(error) => {
                             drop(r);
@@ -2148,7 +2172,7 @@ impl Runtime {
                     match r.start_forked_turn(&message["result"], &self.store) {
                         Ok(request) => {
                             changed = true;
-                            Some(request)
+                            if r.task.code_workspace.is_some(){r.writing_turn=Some(request);Some(json!({"id":89,"method":"mcpServerStatus/list","params":{"limit":100}}))}else{Some(request)}
                         }
                         Err(error) => {
                             drop(r);
@@ -2236,10 +2260,11 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| "运行已失效，请核对状态".into())
     }
-    pub fn steer(&self, app: &AppHandle, id: String, text: String) -> Result<(), String> {
+    pub fn steer(&self,app:&AppHandle,id:String,text:String)->Result<(),String>{self.steer_sources(app,id,text,vec![])}
+    pub fn steer_sources(&self, app:&AppHandle, id:String, text:String, sources:Vec<crate::sources::SourceSnapshot>)->Result<(),String>{
         let run = self.run(&id)?;
         let mut r = run.lock().unwrap();
-        let (candidate, request) = r.direction_request(&text)?;
+        let (candidate, request) = r.direction_with_sources(&text,sources)?;
         let request_id = r.next_id;
         let saved = self
             .store
@@ -2404,7 +2429,15 @@ impl Executor for Runtime {
     fn ensure_idle(&self) -> Result<(), String> {
         Runtime::ensure_idle(self)
     }
+    fn ownership(&self)->Vec<crate::executor::Ownership>{
+        self.runs.lock().unwrap().values().filter_map(|run|{let r=run.lock().unwrap();(!r.idle()).then(||crate::executor::Ownership{task_id:r.task.id.clone(),run_id:r.task.run_id.clone().unwrap(),session_id:r.task.thread_id.clone()})}).collect()
+    }
+    fn abort_start(&self,app:AppHandle,id:String)->Result<(),String>{
+        let run=self.run(&id)?;self.fail(&app,&run,"启动已取消","interrupted");
+        let mut r=run.lock().unwrap();r.child.stop()?;if r.idle(){Ok(())}else{Err("进程清理未确认".into())}
+    }
     fn ensure_task_idle(&self, task_id: &str) -> Result<(), String> {
+        self.ensure_inspections_clean()?;
         for run in self.runs.lock().unwrap().values() {
             let r = run.lock().unwrap();
             if r.task.id == task_id && !r.idle() {
@@ -2424,6 +2457,7 @@ impl Executor for Runtime {
     fn steer(&self, app: &AppHandle, run_id: String, text: String) -> Result<(), String> {
         Runtime::steer(self, app, run_id, text)
     }
+    fn steer_sources(&self,app:&AppHandle,run_id:String,text:String,sources:Vec<crate::sources::SourceSnapshot>)->Result<(),String>{Runtime::steer_sources(self,app,run_id,text,sources)}
     fn interrupt(&self, app: AppHandle, run_id: String) -> Result<(), String> {
         Runtime::interrupt(self, app, run_id)
     }
@@ -2448,7 +2482,7 @@ impl Executor for Runtime {
         self.runs
             .lock()
             .unwrap()
-            .retain(|_, r| r.lock().unwrap().task.id != task_id);
+            .retain(|_, r| {let r=r.lock().unwrap();r.task.id != task_id||!r.idle()});
     }
     fn shutdown(&self) {
         Runtime::shutdown(self)
